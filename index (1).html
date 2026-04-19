@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GrupoDrop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0e0e10;--surface:#18181c;--surface2:#222228;
+  --border:rgba(255,255,255,0.07);--border-active:rgba(255,255,255,0.18);
+  --text:#f0efec;--text-muted:#888;--text-dim:#555;
+  --accent:#c8f04a;--accent-dim:rgba(200,240,74,0.12);--accent-text:#0e0e10;
+  --red:#ff5f5f;--red-dim:rgba(255,95,95,0.12);
+  --amber:#f0a040;--amber-dim:rgba(240,160,64,0.12);
+  --radius:10px;--radius-sm:6px;
+}
+html,body,#root{height:100%;background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;}
+button{font-family:inherit;cursor:pointer;border:none;outline:none;background:none;}
+input,select{font-family:'DM Mono',monospace;font-size:13px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:9px 12px;width:100%;outline:none;transition:border-color 0.15s;}
+input:focus,select:focus{border-color:var(--border-active);}
+input::placeholder{color:var(--text-dim);}
+select option{background:var(--surface2);}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-thumb{background:var(--border-active);border-radius:2px;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useCallback } = React;
+
+// ── Paleta de avatares ──────────────────────────────────────────────
+const PALETTE = ['#c8f04a','#4af0d0','#f04a9a','#f0a040','#a040f0','#4a90f0','#f05a40','#40d4f0','#f0e040','#90f040'];
+
+// ── Persistência ────────────────────────────────────────────────────
+function load(key, fallback) {
+  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; } catch { return fallback; }
+}
+function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
+
+// ── Store ───────────────────────────────────────────────────────────
+function useStore() {
+  const [members, setMembersRaw] = useState(() => load('gd_members', ['Ana','Bruno','Carol','Diego','Elena','Felipe','Gabi','Hugo','Iris','João']));
+  const [items,   setItemsRaw]   = useState(() => load('gd_items',   ['Espada Lendária','Armadura Épica','Poção Rara','Anel Mágico','Capa do Herói']));
+  const [attendance, setAttRaw]  = useState(() => load('gd_attendance', {}));
+  const [sessions,   setSessRaw] = useState(() => load('gd_sessions', []));
+
+  const setMembers   = v => { setMembersRaw(v);  save('gd_members',    v); };
+  const setItems     = v => { setItemsRaw(v);    save('gd_items',      v); };
+  const setAttendance= v => { setAttRaw(v);      save('gd_attendance', v); };
+  const setSessions  = v => { setSessRaw(v);     save('gd_sessions',   v); };
+
+  const todayKey = new Date().toISOString().split('T')[0];
+
+  function getActivityScore(name) {
+    const days = Object.keys(attendance);
+    if (!days.length) return 0;
+    return Math.round(days.filter(d => attendance[d]?.[name]).length / days.length * 100);
+  }
+  function getTotalDays(name) { return Object.values(attendance).filter(d => d?.[name]).length; }
+  function toggleAttendance(name, dateKey) {
+    const day = attendance[dateKey] || {};
+    setAttendance({ ...attendance, [dateKey]: { ...day, [name]: !day[name] } });
+  }
+  function addSession(drops) {
+    const s = { id: Date.now(), date: todayKey, drops, timestamp: new Date().toISOString() };
+    setSessions([s, ...sessions]); return s;
+  }
+  function deleteSession(id) { setSessions(sessions.filter(s => s.id !== id)); }
+  function addMember(name) { if (!name || members.includes(name)) return false; setMembers([...members, name]); return true; }
+  function removeMember(name) { setMembers(members.filter(m => m !== name)); }
+  function addItem(name) { if (!name || items.includes(name)) return false; setItems([...items, name]); return true; }
+  function removeItem(name) { setItems(items.filter(i => i !== name)); }
+
+  return { members, items, attendance, sessions, todayKey, getActivityScore, getTotalDays, toggleAttendance, addSession, deleteSession, addMember, removeMember, addItem, removeItem };
+}
+
+// ── Componentes base ─────────────────────────────────────────────────
+function Avatar({ name, size=36, index=0 }) {
+  const color = PALETTE[index % PALETTE.length];
+  const initials = name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+  return <div style={{ width:size, height:size, borderRadius:'50%', background:color+'20', border:`1px solid ${color}40`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:size*0.36, fontWeight:700, color, flexShrink:0, fontFamily:'Syne,sans-serif' }}>{initials}</div>;
+}
+
+function Btn({ children, onClick, variant='default', small, disabled, style={} }) {
+  const base = { display:'inline-flex', alignItems:'center', justifyContent:'center', gap:6, padding:small?'6px 12px':'9px 18px', fontSize:small?12:13, fontWeight:600, borderRadius:'var(--radius-sm)', fontFamily:'Syne,sans-serif', cursor:'pointer', border:'none', opacity: disabled ? 0.4 : 1, ...style };
+  if (variant==='accent') return <button onClick={onClick} disabled={disabled} style={{ ...base, background:'var(--accent)', color:'var(--accent-text)' }}>{children}</button>;
+  if (variant==='danger') return <button onClick={onClick} disabled={disabled} style={{ ...base, background:'var(--red-dim)', color:'var(--red)', border:'1px solid rgba(255,95,95,0.3)' }}>{children}</button>;
+  return <button onClick={onClick} disabled={disabled} style={{ ...base, background:'var(--surface2)', color:'var(--text)', border:'1px solid var(--border)' }}>{children}</button>;
+}
+
+function Card({ children, style={} }) {
+  return <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:'var(--radius)', padding:'16px 20px', ...style }}>{children}</div>;
+}
+
+function SectionTitle({ children }) {
+  return <div style={{ fontFamily:'DM Mono,monospace', fontSize:11, fontWeight:500, color:'var(--text-dim)', textTransform:'uppercase', letterSpacing:'0.08em', margin:'20px 0 10px' }}>{children}</div>;
+}
+
+function ActivityBar({ score }) {
+  const color = score>=70?'var(--accent)':score>=40?'var(--amber)':'var(--red)';
+  return <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+    <div style={{ width:72, height:4, background:'var(--surface2)', borderRadius:2, overflow:'hidden' }}>
+      <div style={{ width:`${score}%`, height:'100%', background:color, borderRadius:2 }} />
+    </div>
+    <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-muted)', minWidth:30 }}>{score}%</span>
+  </div>;
+}
+
+function Badge({ children, variant='default' }) {
+  const s = { default:{ background:'var(--surface2)', color:'var(--text-muted)' }, accent:{ background:'var(--accent-dim)', color:'var(--accent)' }, red:{ background:'var(--red-dim)', color:'var(--red)' }, amber:{ background:'var(--amber-dim)', color:'var(--amber)' } };
+  return <span style={{ fontFamily:'DM Mono', fontSize:11, fontWeight:500, padding:'2px 8px', borderRadius:20, ...s[variant] }}>{children}</span>;
+}
+
+function Row({ children, style={} }) { return <div style={{ display:'flex', alignItems:'center', gap:12, ...style }}>{children}</div>; }
+
+// ── Aba Presença ──────────────────────────────────────────────────────
+function Presenca({ store }) {
+  const { members, todayKey, attendance, getActivityScore, getTotalDays, toggleAttendance } = store;
+  const [saved, setSaved] = useState(false);
+  const today = attendance[todayKey] || {};
+  const presentCount = members.filter(m => today[m]).length;
+  const byActivity = [...members].map((m,i)=>({ name:m, score:getActivityScore(m), idx:i })).sort((a,b)=>b.score-a.score);
+  const dateLabel = new Date().toLocaleDateString('pt-BR',{ weekday:'long', day:'2-digit', month:'long', year:'numeric' });
+
+  return <div>
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:20 }}>
+      <div>
+        <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em' }}>Presença</h1>
+        <p style={{ fontSize:13, color:'var(--text-muted)', marginTop:2, textTransform:'capitalize' }}>{dateLabel}</p>
+      </div>
+      <Btn variant="accent" onClick={()=>{ setSaved(true); setTimeout(()=>setSaved(false),1800); }}>{saved?'✓ Salvo!':'Salvar'}</Btn>
+    </div>
+
+    <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:20 }}>
+      {[{ label:'Presentes', value:presentCount, color:'var(--accent)' },{ label:'Ausentes', value:members.length-presentCount, color:'var(--red)' },{ label:'Total', value:members.length, color:'var(--text-muted)' }].map(s=>(
+        <Card key={s.label} style={{ textAlign:'center', padding:'14px 10px' }}>
+          <div style={{ fontSize:28, fontWeight:800, color:s.color }}>{s.value}</div>
+          <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>{s.label}</div>
+        </Card>
+      ))}
+    </div>
+
+    <SectionTitle>Marcar presença de hoje</SectionTitle>
+    <Card style={{ padding:0 }}>
+      {members.map((m,i)=>{
+        const present = today[m] || false;
+        return <div key={m} onClick={()=>toggleAttendance(m,todayKey)} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<members.length-1?'1px solid var(--border)':'none', cursor:'pointer', background:present?'var(--accent-dim)':'transparent', transition:'background 0.15s' }}>
+          <Avatar name={m} index={i} size={34} />
+          <div style={{ flex:1, fontWeight:500, fontSize:14 }}>{m}</div>
+          <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-dim)' }}>{getTotalDays(m)}d</span>
+          <div style={{ width:22, height:22, borderRadius:'50%', border:present?'2px solid var(--accent)':'1px solid var(--border-active)', background:present?'var(--accent)':'transparent', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, color:'var(--accent-text)', transition:'all 0.15s' }}>{present?'✓':''}</div>
+        </div>;
+      })}
+    </Card>
+
+    <SectionTitle>Ranking de atividade</SectionTitle>
+    <Card style={{ padding:0 }}>
+      {byActivity.map((item,rank)=>(
+        <div key={item.name} style={{ display:'flex', alignItems:'center', gap:12, padding:'11px 20px', borderBottom:rank<members.length-1?'1px solid var(--border)':'none' }}>
+          <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-dim)', width:18 }}>#{rank+1}</span>
+          <Avatar name={item.name} index={item.idx} size={30} />
+          <span style={{ flex:1, fontSize:13, fontWeight:500 }}>{item.name}</span>
+          <ActivityBar score={item.score} />
+        </div>
+      ))}
+    </Card>
+  </div>;
+}
+
+// ── Aba Drops ─────────────────────────────────────────────────────────
+function Drops({ store }) {
+  const { members, items, sessions, addSession, deleteSession, todayKey } = store;
+  const [drops, setDrops] = useState(()=>{ const d={}; items.forEach(i=>d[i]=null); return d; });
+
+  const syncedDrops = {};
+  items.forEach(i => syncedDrops[i] = drops[i] ?? null);
+
+  const setMember = (item, member) => setDrops(prev=>({ ...prev, [item]: member===prev[item]?null:member }));
+  const anyDrop = items.some(i=>syncedDrops[i]);
+
+  const handleSave = () => {
+    const dropList = items.filter(i=>syncedDrops[i]).map(i=>({ item:i, member:syncedDrops[i] }));
+    if (!dropList.length) return;
+    addSession(dropList);
+    const reset={}; items.forEach(i=>reset[i]=null); setDrops(reset);
+  };
+
+  const todaySessions = sessions.filter(s=>s.date===todayKey);
+
+  return <div>
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:20 }}>
+      <div>
+        <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em' }}>Drops</h1>
+        <p style={{ fontSize:13, color:'var(--text-muted)', marginTop:2 }}>Marque quem ganhou cada item</p>
+      </div>
+      <Btn variant="accent" onClick={handleSave} disabled={!anyDrop}>Salvar sessão</Btn>
+    </div>
+
+    <SectionTitle>Itens desta sessão</SectionTitle>
+    {items.length===0 && <Card style={{ textAlign:'center', color:'var(--text-muted)', fontSize:13, padding:'32px 20px' }}>Nenhum item cadastrado. Vá em Configurar para adicionar.</Card>}
+    {items.map(item=>{
+      const selected = syncedDrops[item];
+      return <Card key={item} style={{ marginBottom:10 }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12 }}>
+          <span style={{ fontWeight:700, fontSize:14 }}>{item}</span>
+          {selected ? <Badge variant="accent">✓ {selected}</Badge> : <Badge>sem drop</Badge>}
+        </div>
+        <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+          {members.map((m,i)=>{
+            const isSel = selected===m;
+            return <button key={m} onClick={()=>setMember(item,m)} style={{ display:'flex', alignItems:'center', gap:6, padding:'5px 10px 5px 6px', borderRadius:20, border:isSel?'1px solid var(--accent)':'1px solid var(--border)', background:isSel?'var(--accent-dim)':'var(--surface2)', color:isSel?'var(--accent)':'var(--text-muted)', fontSize:12, fontWeight:isSel?600:400, fontFamily:'Syne,sans-serif', cursor:'pointer', transition:'all 0.12s' }}>
+              <Avatar name={m} index={i} size={18} />{m}
+            </button>;
+          })}
+        </div>
+      </Card>;
+    })}
+
+    {todaySessions.length>0 && <>
+      <SectionTitle>Sessões salvas hoje</SectionTitle>
+      {todaySessions.map(session=>(
+        <Card key={session.id} style={{ marginBottom:10 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
+            <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-muted)' }}>{new Date(session.timestamp).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</span>
+            <button onClick={()=>deleteSession(session.id)} style={{ fontSize:11, color:'var(--red)', cursor:'pointer', fontFamily:'Syne', background:'none', border:'none' }}>Remover</button>
+          </div>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+            {session.drops.map(d=>(
+              <div key={d.item} style={{ display:'flex', alignItems:'center', gap:5, fontSize:12, padding:'4px 10px', background:'var(--surface2)', borderRadius:20, border:'1px solid var(--border)' }}>
+                <span style={{ color:'var(--accent)' }}>◆</span>
+                <span style={{ fontWeight:600 }}>{d.item}</span>
+                <span style={{ color:'var(--text-muted)' }}>→ {d.member}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ))}
+    </>}
+  </div>;
+}
+
+// ── Aba Distribuir ────────────────────────────────────────────────────
+function Distribuir({ store }) {
+  const { members, sessions, todayKey, getActivityScore } = store;
+  const todaySessions = sessions.filter(s=>s.date===todayKey);
+  const allDrops = todaySessions.flatMap(s=>s.drops);
+
+  const memberDrops={};
+  allDrops.forEach(({item,member})=>{ if(!memberDrops[member]) memberDrops[member]=[]; memberDrops[member].push(item); });
+
+  const itemWinners={};
+  allDrops.forEach(({item,member})=>{ if(!itemWinners[item]) itemWinners[item]=[]; itemWinners[item].push(member); });
+
+  const membersWithDrop = new Set(allDrops.map(d=>d.member));
+  const membersWithout = members.filter(m=>!membersWithDrop.has(m));
+  const duplicateItems = Object.entries(itemWinners).filter(([,v])=>v.length>1);
+  const byActivity = [...members].map(m=>({ name:m, score:getActivityScore(m), idx:members.indexOf(m) })).sort((a,b)=>b.score-a.score);
+
+  if (!todaySessions.length) return <div>
+    <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em', marginBottom:4 }}>Distribuir</h1>
+    <p style={{ fontSize:13, color:'var(--text-muted)', marginBottom:20 }}>Sugestões baseadas nos drops e atividade</p>
+    <Card style={{ textAlign:'center', color:'var(--text-muted)', fontSize:13, padding:'48px 20px' }}>Nenhuma sessão salva hoje. Registre os drops primeiro.</Card>
+  </div>;
+
+  return <div>
+    <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em', marginBottom:4 }}>Distribuir</h1>
+    <p style={{ fontSize:13, color:'var(--text-muted)', marginBottom:20 }}>Sugestões baseadas nos drops e atividade</p>
+
+    <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:4 }}>
+      {[{ label:'drops hoje', value:allDrops.length, color:'var(--accent)' },{ label:'receberam', value:membersWithDrop.size, color:'var(--text)' },{ label:'sem drop', value:membersWithout.length, color:membersWithout.length>0?'var(--red)':'var(--text-muted)' }].map(s=>(
+        <Card key={s.label} style={{ textAlign:'center', padding:'14px 10px' }}>
+          <div style={{ fontSize:28, fontWeight:800, color:s.color }}>{s.value}</div>
+          <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>{s.label}</div>
+        </Card>
+      ))}
+    </div>
+
+    <SectionTitle>Resumo dos drops</SectionTitle>
+    <Card style={{ padding:0 }}>
+      {byActivity.map((item,i)=>{
+        const d = memberDrops[item.name]||[];
+        return <div key={item.name} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<members.length-1?'1px solid var(--border)':'none' }}>
+          <Avatar name={item.name} index={item.idx} size={32} />
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:13, fontWeight:600 }}>{item.name}</div>
+            <div style={{ marginTop:4, display:'flex', flexWrap:'wrap', gap:4 }}>
+              {d.length===0 ? <Badge variant="red">sem drop</Badge> : d.map(x=><Badge key={x} variant="accent">{x}</Badge>)}
+            </div>
+          </div>
+          <ActivityBar score={item.score} />
+        </div>;
+      })}
+    </Card>
+
+    {membersWithout.length>0 && <>
+      <SectionTitle>Sem drop — ordem de prioridade</SectionTitle>
+      <Card style={{ padding:0 }}>
+        {membersWithout.map(m=>({ name:m, score:getActivityScore(m), idx:members.indexOf(m) })).sort((a,b)=>b.score-a.score).map((item,i,arr)=>(
+          <div key={item.name} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<arr.length-1?'1px solid var(--border)':'none', background:i===0?'var(--accent-dim)':'transparent' }}>
+            <span style={{ fontFamily:'DM Mono', fontSize:11, color:i===0?'var(--accent)':'var(--text-dim)', width:20 }}>#{i+1}</span>
+            <Avatar name={item.name} index={item.idx} size={32} />
+            <span style={{ flex:1, fontSize:13, fontWeight:i===0?700:500 }}>{item.name}</span>
+            <ActivityBar score={item.score} />
+            {i===0 && <Badge variant="accent">prioridade</Badge>}
+          </div>
+        ))}
+      </Card>
+    </>}
+
+    {duplicateItems.length>0 && <>
+      <SectionTitle>Itens repetidos — sugestão de redistribuição</SectionTitle>
+      {duplicateItems.map(([item,winners])=>{
+        const extras = winners.slice(1);
+        const candidates = membersWithout.map(m=>({ name:m, score:getActivityScore(m), idx:members.indexOf(m) })).sort((a,b)=>b.score-a.score).slice(0,extras.length);
+        return <Card key={item} style={{ marginBottom:10 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
+            <span style={{ color:'var(--accent)', fontSize:14 }}>◆</span>
+            <span style={{ fontWeight:700, fontSize:14 }}>{item}</span>
+            <Badge variant="amber">{winners.length}x dropado</Badge>
+          </div>
+          <div style={{ fontSize:12, color:'var(--text-muted)', marginBottom:10 }}>Receberam: {winners.join(', ')}</div>
+          {candidates.length>0 ? candidates.map((c,ci)=>(
+            <div key={c.name} style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 12px', borderRadius:'var(--radius-sm)', background:'var(--surface2)', border:'1px solid var(--border)', marginBottom:6 }}>
+              <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-dim)' }}>#{ci+1}</span>
+              <Avatar name={c.name} index={c.idx} size={26} />
+              <span style={{ flex:1, fontSize:13, fontWeight:600 }}>{c.name}</span>
+              <ActivityBar score={c.score} />
+            </div>
+          )) : <div style={{ fontSize:12, color:'var(--text-muted)' }}>Todos já receberam um drop hoje.</div>}
+        </Card>;
+      })}
+    </>}
+
+    {membersWithout.length===0 && duplicateItems.length===0 && (
+      <Card style={{ textAlign:'center', padding:'32px 20px', marginTop:10 }}>
+        <div style={{ fontSize:28, marginBottom:8 }}>🎉</div>
+        <div style={{ fontWeight:700 }}>Todos receberam suas recompensas!</div>
+        <div style={{ fontSize:13, color:'var(--text-muted)', marginTop:4 }}>Nenhuma redistribuição necessária.</div>
+      </Card>
+    )}
+  </div>;
+}
+
+// ── Aba Configurar ────────────────────────────────────────────────────
+function Configurar({ store }) {
+  const { members, items, addMember, removeMember, addItem, removeItem, getActivityScore } = store;
+  const [newMember, setNewMember] = useState('');
+  const [newItem,   setNewItem]   = useState('');
+  const [memberErr, setMemberErr] = useState('');
+  const [itemErr,   setItemErr]   = useState('');
+
+  const handleAddMember = () => {
+    if (!newMember.trim()) return;
+    if (!addMember(newMember.trim())) { setMemberErr('Membro já existe'); return; }
+    setNewMember(''); setMemberErr('');
+  };
+  const handleAddItem = () => {
+    if (!newItem.trim()) return;
+    if (!addItem(newItem.trim())) { setItemErr('Item já existe'); return; }
+    setNewItem(''); setItemErr('');
+  };
+
+  return <div>
+    <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em', marginBottom:4 }}>Configurar</h1>
+    <p style={{ fontSize:13, color:'var(--text-muted)', marginBottom:20 }}>Gerencie membros e itens de recompensa</p>
+
+    <SectionTitle>Itens de recompensa ({items.length})</SectionTitle>
+    <Card style={{ marginBottom:10 }}>
+      <div style={{ display:'flex', gap:8 }}>
+        <input value={newItem} onChange={e=>{setNewItem(e.target.value);setItemErr('');}} onKeyDown={e=>e.key==='Enter'&&handleAddItem()} placeholder="Nome do item..." style={{ flex:1 }} />
+        <Btn variant="accent" onClick={handleAddItem} small>Adicionar</Btn>
+      </div>
+      {itemErr && <div style={{ fontSize:12, color:'var(--red)', marginTop:6 }}>{itemErr}</div>}
+    </Card>
+    {items.length===0
+      ? <Card style={{ textAlign:'center', color:'var(--text-muted)', fontSize:13, padding:'24px 20px' }}>Nenhum item cadastrado.</Card>
+      : <Card style={{ padding:0 }}>
+          {items.map((item,i)=>(
+            <div key={item} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<items.length-1?'1px solid var(--border)':'none' }}>
+              <div style={{ width:8, height:8, borderRadius:2, background:'var(--accent)', flexShrink:0 }} />
+              <span style={{ flex:1, fontSize:14, fontWeight:500 }}>{item}</span>
+              <button onClick={()=>removeItem(item)} style={{ fontSize:12, color:'var(--red)', cursor:'pointer', background:'none', border:'none', fontFamily:'Syne', padding:'4px 8px', borderRadius:'var(--radius-sm)' }}>Remover</button>
+            </div>
+          ))}
+        </Card>
+    }
+
+    <SectionTitle>Membros do grupo ({members.length})</SectionTitle>
+    <Card style={{ marginBottom:10 }}>
+      <div style={{ display:'flex', gap:8 }}>
+        <input value={newMember} onChange={e=>{setNewMember(e.target.value);setMemberErr('');}} onKeyDown={e=>e.key==='Enter'&&handleAddMember()} placeholder="Nome do membro..." style={{ flex:1 }} />
+        <Btn variant="accent" onClick={handleAddMember} small>Adicionar</Btn>
+      </div>
+      {memberErr && <div style={{ fontSize:12, color:'var(--red)', marginTop:6 }}>{memberErr}</div>}
+    </Card>
+    <Card style={{ padding:0 }}>
+      {members.map((m,i)=>(
+        <div key={m} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<members.length-1?'1px solid var(--border)':'none' }}>
+          <Avatar name={m} index={i} size={32} />
+          <span style={{ flex:1, fontSize:13, fontWeight:600 }}>{m}</span>
+          <ActivityBar score={getActivityScore(m)} />
+          <button onClick={()=>removeMember(m)} style={{ fontSize:12, color:'var(--red)', cursor:'pointer', background:'none', border:'none', fontFamily:'Syne', padding:'4px 8px' }}>Remover</button>
+        </div>
+      ))}
+    </Card>
+
+    <div style={{ marginTop:32, padding:'16px 20px', background:'var(--surface)', border:'1px solid var(--border)', borderRadius:'var(--radius)', fontSize:12, color:'var(--text-muted)', fontFamily:'DM Mono' }}>
+      <div style={{ fontWeight:500, color:'var(--text-dim)', marginBottom:6 }}>// dados salvos localmente</div>
+      Todos os dados persistem no localStorage do navegador entre sessões.
+    </div>
+  </div>;
+}
+
+// ── App principal ─────────────────────────────────────────────────────
+const TABS = [{ id:'presenca', label:'Presença' },{ id:'drops', label:'Drops' },{ id:'distribuir', label:'Distribuir' },{ id:'config', label:'Configurar' }];
+
+function App() {
+  const [tab, setTab] = useState('presenca');
+  const store = useStore();
+
+  return <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column' }}>
+    <header style={{ borderBottom:'1px solid var(--border)', padding:'0 24px', display:'flex', alignItems:'center', justifyContent:'space-between', height:60, flexShrink:0 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+        <div style={{ width:28, height:28, borderRadius:6, background:'var(--accent)', display:'flex', alignItems:'center', justifyContent:'center' }}>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><polygon points="7,1 13,5 13,9 7,13 1,9 1,5" fill="#0e0e10"/></svg>
+        </div>
+        <span style={{ fontWeight:800, fontSize:17, letterSpacing:'-0.01em' }}>GrupoDrop</span>
+      </div>
+      <div style={{ fontFamily:'DM Mono', fontSize:12, color:'var(--text-muted)' }}>
+        {store.members.length} membros · {new Date().toLocaleDateString('pt-BR',{ day:'2-digit', month:'short' })}
+      </div>
+    </header>
+
+    <nav style={{ display:'flex', gap:2, padding:'10px 24px 0', borderBottom:'1px solid var(--border)', flexShrink:0 }}>
+      {TABS.map(t=>(
+        <button key={t.id} onClick={()=>setTab(t.id)} style={{ padding:'8px 16px', fontSize:13, fontWeight:tab===t.id?600:400, fontFamily:'Syne,sans-serif', color:tab===t.id?'var(--accent)':'var(--text-muted)', borderBottom:tab===t.id?'2px solid var(--accent)':'2px solid transparent', marginBottom:-1, background:'none', border:'none', borderBottom:tab===t.id?'2px solid var(--accent)':'2px solid transparent', cursor:'pointer' }}>
+          {t.label}
+        </button>
+      ))}
+    </nav>
+
+    <main style={{ flex:1, overflow:'auto', padding:'24px' }}>
+      <div style={{ maxWidth:720, margin:'0 auto' }}>
+        {tab==='presenca'   && <Presenca  store={store} />}
+        {tab==='drops'      && <Drops     store={store} />}
+        {tab==='distribuir' && <Distribuir store={store} />}
+        {tab==='config'     && <Configurar store={store} />}
+      </div>
+    </main>
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
