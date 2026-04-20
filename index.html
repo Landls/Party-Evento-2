@@ -69,8 +69,8 @@ function useStore() {
     const day = attendance[dateKey] || {};
     setAttendance({ ...attendance, [dateKey]: { ...day, [name]: !day[name] } });
   }
-  function addSession(drops) {
-    const s = { id: Date.now(), date: todayKey, drops, timestamp: new Date().toISOString() };
+  function addSession(drops, dateKey) {
+    const s = { id: Date.now(), date: dateKey || todayKey, drops, timestamp: new Date().toISOString() };
     setSessions([s, ...sessions]); return s;
   }
   function deleteSession(id) { setSessions(sessions.filter(s => s.id !== id)); }
@@ -121,23 +121,43 @@ function Badge({ children, variant='default' }) {
 
 function Row({ children, style={} }) { return <div style={{ display:'flex', alignItems:'center', gap:12, ...style }}>{children}</div>; }
 
+// ── Seletor de data compartilhado ────────────────────────────────────
+function DatePicker({ value, onChange, todayKey }) {
+  const isToday = value === todayKey;
+  const label = isToday ? 'hoje' : value < todayKey ? 'passado' : 'futuro';
+  const labelColor = isToday ? 'var(--accent)' : value < todayKey ? 'var(--amber)' : 'var(--text-muted)';
+  return <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:20 }}>
+    <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-dim)' }}>data da run</span>
+    <input type="date" value={value} onChange={e=>onChange(e.target.value)}
+      style={{ width:'auto', flex:1, maxWidth:180, padding:'6px 10px', fontSize:13 }} />
+    <span style={{ fontFamily:'DM Mono', fontSize:11, padding:'2px 8px', borderRadius:20,
+      background: isToday?'var(--accent-dim)': value<todayKey?'var(--amber-dim)':'var(--surface2)',
+      color: labelColor }}>
+      {label}
+    </span>
+    {!isToday && <button onClick={()=>onChange(todayKey)} style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-muted)', cursor:'pointer', background:'none', border:'1px solid var(--border)', borderRadius:'var(--radius-sm)', padding:'4px 8px' }}>voltar para hoje</button>}
+  </div>;
+}
+
 // ── Aba Presença ──────────────────────────────────────────────────────
-function Presenca({ store }) {
+function Presenca({ store, selectedDate, setSelectedDate }) {
   const { members, todayKey, attendance, getActivityScore, getTotalDays, toggleAttendance } = store;
   const [saved, setSaved] = useState(false);
-  const today = attendance[todayKey] || {};
-  const presentCount = members.filter(m => today[m]).length;
+  const dateKey = selectedDate;
+  const day = attendance[dateKey] || {};
+  const presentCount = members.filter(m => day[m]).length;
   const byActivity = [...members].map((m,i)=>({ name:m, score:getActivityScore(m), idx:i })).sort((a,b)=>b.score-a.score);
-  const dateLabel = new Date().toLocaleDateString('pt-BR',{ weekday:'long', day:'2-digit', month:'long', year:'numeric' });
 
   return <div>
-    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:20 }}>
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:12 }}>
       <div>
         <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em' }}>Presença</h1>
-        <p style={{ fontSize:13, color:'var(--text-muted)', marginTop:2, textTransform:'capitalize' }}>{dateLabel}</p>
+        <p style={{ fontSize:13, color:'var(--text-muted)', marginTop:2 }}>Marque quem esteve presente na run</p>
       </div>
       <Btn variant="accent" onClick={()=>{ setSaved(true); setTimeout(()=>setSaved(false),1800); }}>{saved?'✓ Salvo!':'Salvar'}</Btn>
     </div>
+
+    <DatePicker value={dateKey} onChange={setSelectedDate} todayKey={todayKey} />
 
     <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:20 }}>
       {[{ label:'Presentes', value:presentCount, color:'var(--accent)' },{ label:'Ausentes', value:members.length-presentCount, color:'var(--red)' },{ label:'Total', value:members.length, color:'var(--text-muted)' }].map(s=>(
@@ -148,11 +168,11 @@ function Presenca({ store }) {
       ))}
     </div>
 
-    <SectionTitle>Marcar presença de hoje</SectionTitle>
+    <SectionTitle>Presença — {dateKey}</SectionTitle>
     <Card style={{ padding:0 }}>
       {members.map((m,i)=>{
-        const present = today[m] || false;
-        return <div key={m} onClick={()=>toggleAttendance(m,todayKey)} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<members.length-1?'1px solid var(--border)':'none', cursor:'pointer', background:present?'var(--accent-dim)':'transparent', transition:'background 0.15s' }}>
+        const present = day[m] || false;
+        return <div key={m} onClick={()=>toggleAttendance(m,dateKey)} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<members.length-1?'1px solid var(--border)':'none', cursor:'pointer', background:present?'var(--accent-dim)':'transparent', transition:'background 0.15s' }}>
           <Avatar name={m} index={i} size={34} />
           <div style={{ flex:1, fontWeight:500, fontSize:14 }}>{m}</div>
           <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-dim)' }}>{getTotalDays(m)}d</span>
@@ -161,7 +181,7 @@ function Presenca({ store }) {
       })}
     </Card>
 
-    <SectionTitle>Ranking de atividade</SectionTitle>
+    <SectionTitle>Ranking de atividade geral</SectionTitle>
     <Card style={{ padding:0 }}>
       {byActivity.map((item,rank)=>(
         <div key={item.name} style={{ display:'flex', alignItems:'center', gap:12, padding:'11px 20px', borderBottom:rank<members.length-1?'1px solid var(--border)':'none' }}>
@@ -176,7 +196,7 @@ function Presenca({ store }) {
 }
 
 // ── Aba Drops ─────────────────────────────────────────────────────────
-function Drops({ store }) {
+function Drops({ store, selectedDate, setSelectedDate }) {
   const { members, items, sessions, addSession, deleteSession, todayKey } = store;
   const [drops, setDrops] = useState(()=>{ const d={}; items.forEach(i=>d[i]=null); return d; });
 
@@ -189,20 +209,22 @@ function Drops({ store }) {
   const handleSave = () => {
     const dropList = items.filter(i=>syncedDrops[i]).map(i=>({ item:i, member:syncedDrops[i] }));
     if (!dropList.length) return;
-    addSession(dropList);
+    addSession(dropList, selectedDate);
     const reset={}; items.forEach(i=>reset[i]=null); setDrops(reset);
   };
 
-  const todaySessions = sessions.filter(s=>s.date===todayKey);
+  const dateSessions = sessions.filter(s=>s.date===selectedDate);
 
   return <div>
-    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:20 }}>
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:12 }}>
       <div>
         <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em' }}>Drops</h1>
         <p style={{ fontSize:13, color:'var(--text-muted)', marginTop:2 }}>Marque quem ganhou cada item</p>
       </div>
       <Btn variant="accent" onClick={handleSave} disabled={!anyDrop}>Salvar sessão</Btn>
     </div>
+
+    <DatePicker value={selectedDate} onChange={setSelectedDate} todayKey={todayKey} />
 
     <SectionTitle>Itens desta sessão</SectionTitle>
     {items.length===0 && <Card style={{ textAlign:'center', color:'var(--text-muted)', fontSize:13, padding:'32px 20px' }}>Nenhum item cadastrado. Vá em Configurar para adicionar.</Card>}
@@ -224,9 +246,9 @@ function Drops({ store }) {
       </Card>;
     })}
 
-    {todaySessions.length>0 && <>
-      <SectionTitle>Sessões salvas hoje</SectionTitle>
-      {todaySessions.map(session=>(
+    {dateSessions.length>0 && <>
+      <SectionTitle>Sessões salvas em {selectedDate}</SectionTitle>
+      {dateSessions.map(session=>(
         <Card key={session.id} style={{ marginBottom:10 }}>
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
             <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-muted)' }}>{new Date(session.timestamp).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</span>
@@ -248,10 +270,10 @@ function Drops({ store }) {
 }
 
 // ── Aba Distribuir ────────────────────────────────────────────────────
-function Distribuir({ store }) {
+function Distribuir({ store, selectedDate, setSelectedDate }) {
   const { members, sessions, todayKey, getActivityScore } = store;
-  const todaySessions = sessions.filter(s=>s.date===todayKey);
-  const allDrops = todaySessions.flatMap(s=>s.drops);
+  const dateSessions = sessions.filter(s=>s.date===selectedDate);
+  const allDrops = dateSessions.flatMap(s=>s.drops);
 
   const memberDrops={};
   allDrops.forEach(({item,member})=>{ if(!memberDrops[member]) memberDrops[member]=[]; memberDrops[member].push(item); });
@@ -264,15 +286,17 @@ function Distribuir({ store }) {
   const duplicateItems = Object.entries(itemWinners).filter(([,v])=>v.length>1);
   const byActivity = [...members].map(m=>({ name:m, score:getActivityScore(m), idx:members.indexOf(m) })).sort((a,b)=>b.score-a.score);
 
-  if (!todaySessions.length) return <div>
+  if (!dateSessions.length) return <div>
     <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em', marginBottom:4 }}>Distribuir</h1>
-    <p style={{ fontSize:13, color:'var(--text-muted)', marginBottom:20 }}>Sugestões baseadas nos drops e atividade</p>
-    <Card style={{ textAlign:'center', color:'var(--text-muted)', fontSize:13, padding:'48px 20px' }}>Nenhuma sessão salva hoje. Registre os drops primeiro.</Card>
+    <p style={{ fontSize:13, color:'var(--text-muted)', marginBottom:12 }}>Sugestões baseadas nos drops e atividade</p>
+    <DatePicker value={selectedDate} onChange={setSelectedDate} todayKey={todayKey} />
+    <Card style={{ textAlign:'center', color:'var(--text-muted)', fontSize:13, padding:'48px 20px' }}>Nenhuma sessão salva em {selectedDate}. Registre os drops primeiro.</Card>
   </div>;
 
   return <div>
     <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em', marginBottom:4 }}>Distribuir</h1>
-    <p style={{ fontSize:13, color:'var(--text-muted)', marginBottom:20 }}>Sugestões baseadas nos drops e atividade</p>
+    <p style={{ fontSize:13, color:'var(--text-muted)', marginBottom:12 }}>Sugestões baseadas nos drops e atividade</p>
+    <DatePicker value={selectedDate} onChange={setSelectedDate} todayKey={todayKey} />
 
     <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:4 }}>
       {[{ label:'drops hoje', value:allDrops.length, color:'var(--accent)' },{ label:'receberam', value:membersWithDrop.size, color:'var(--text)' },{ label:'sem drop', value:membersWithout.length, color:membersWithout.length>0?'var(--red)':'var(--text-muted)' }].map(s=>(
@@ -425,6 +449,7 @@ const TABS = [{ id:'presenca', label:'Presença' },{ id:'drops', label:'Drops' }
 function App() {
   const [tab, setTab] = useState('presenca');
   const store = useStore();
+  const [selectedDate, setSelectedDate] = useState(store.todayKey);
 
   return <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column' }}>
     <header style={{ borderBottom:'1px solid var(--border)', padding:'0 24px', display:'flex', alignItems:'center', justifyContent:'space-between', height:60, flexShrink:0 }}>
@@ -449,9 +474,9 @@ function App() {
 
     <main style={{ flex:1, overflow:'auto', padding:'24px' }}>
       <div style={{ maxWidth:720, margin:'0 auto' }}>
-        {tab==='presenca'   && <Presenca  store={store} />}
-        {tab==='drops'      && <Drops     store={store} />}
-        {tab==='distribuir' && <Distribuir store={store} />}
+        {tab==='presenca'   && <Presenca  store={store} selectedDate={selectedDate} setSelectedDate={setSelectedDate} />}
+        {tab==='drops'      && <Drops     store={store} selectedDate={selectedDate} setSelectedDate={setSelectedDate} />}
+        {tab==='distribuir' && <Distribuir store={store} selectedDate={selectedDate} setSelectedDate={setSelectedDate} />}
         {tab==='config'     && <Configurar store={store} />}
       </div>
     </main>
