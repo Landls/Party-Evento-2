@@ -19,6 +19,8 @@
   --accent:#c8f04a;--accent-dim:rgba(200,240,74,0.12);--accent-text:#0e0e10;
   --red:#ff5f5f;--red-dim:rgba(255,95,95,0.12);
   --amber:#f0a040;--amber-dim:rgba(240,160,64,0.12);
+  --blue:#4a90f0;--blue-dim:rgba(74,144,240,0.12);
+  --purple:#a040f0;--purple-dim:rgba(160,64,240,0.12);
   --radius:10px;--radius-sm:6px;
 }
 html,body,#root{height:100%;background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;}
@@ -34,456 +36,703 @@ select option{background:var(--surface2);}
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useCallback } = React;
+const { useState, useMemo } = React;
 
-// ── Paleta de avatares ──────────────────────────────────────────────
 const PALETTE = ['#c8f04a','#4af0d0','#f04a9a','#f0a040','#a040f0','#4a90f0','#f05a40','#40d4f0','#f0e040','#90f040'];
 
-// ── Persistência ────────────────────────────────────────────────────
-function load(key, fallback) {
-  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; } catch { return fallback; }
-}
-function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
+function load(key, fb) { try { const r=localStorage.getItem(key); return r?JSON.parse(r):fb; } catch { return fb; } }
+function save(key, val) { try { localStorage.setItem(key,JSON.stringify(val)); } catch {} }
 
-// ── Store ───────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// STORE
+// members: string[]
+// bosses:  { id, name, items: string[] }[]
+// attendance: { [dateKey]: { [member]: bool } }
+// runs: { id, date, bossId, drops:[{item,droppedBy}], received:[{item,member,reason}] }[]
+// ─────────────────────────────────────────────────────────────────────
 function useStore() {
-  const [members, setMembersRaw] = useState(() => load('gd_members', ['Ana','Bruno','Carol','Diego','Elena','Felipe','Gabi','Hugo','Iris','João']));
-  const [items,   setItemsRaw]   = useState(() => load('gd_items',   ['Espada Lendária','Armadura Épica','Poção Rara','Anel Mágico','Capa do Herói']));
-  const [attendance, setAttRaw]  = useState(() => load('gd_attendance', {}));
-  const [sessions,   setSessRaw] = useState(() => load('gd_sessions', []));
+  const [members,    setM] = useState(()=>load('gd3_members',    ['Ana','Bruno','Carol','Diego','Elena','Felipe','Gabi','Hugo','Iris','João']));
+  const [bosses,     setB] = useState(()=>load('gd3_bosses',     []));
+  const [attendance, setA] = useState(()=>load('gd3_attendance', {}));
+  const [runs,       setR] = useState(()=>load('gd3_runs',       []));
 
-  const setMembers   = v => { setMembersRaw(v);  save('gd_members',    v); };
-  const setItems     = v => { setItemsRaw(v);    save('gd_items',      v); };
-  const setAttendance= v => { setAttRaw(v);      save('gd_attendance', v); };
-  const setSessions  = v => { setSessRaw(v);     save('gd_sessions',   v); };
+  const sm=v=>{setM(v);save('gd3_members',v);};
+  const sb=v=>{setB(v);save('gd3_bosses',v);};
+  const sa=v=>{setA(v);save('gd3_attendance',v);};
+  const sr=v=>{setR(v);save('gd3_runs',v);};
 
   const todayKey = new Date().toISOString().split('T')[0];
 
-  function getActivityScore(name) {
-    const days = Object.keys(attendance);
-    if (!days.length) return 0;
-    return Math.round(days.filter(d => attendance[d]?.[name]).length / days.length * 100);
+  function toggleAttendance(name,dateKey){
+    const day=attendance[dateKey]||{};
+    sa({...attendance,[dateKey]:{...day,[name]:!day[name]}});
   }
-  function getTotalDays(name) { return Object.values(attendance).filter(d => d?.[name]).length; }
-  function toggleAttendance(name, dateKey) {
-    const day = attendance[dateKey] || {};
-    setAttendance({ ...attendance, [dateKey]: { ...day, [name]: !day[name] } });
+  function getPresenceDays(name){ return Object.values(attendance).filter(d=>d?.[name]).length; }
+  function getActivityPct(name){
+    const days=Object.keys(attendance);
+    if(!days.length) return 0;
+    return Math.round(days.filter(d=>attendance[d]?.[name]).length/days.length*100);
   }
-  function addSession(drops, dateKey) {
-    const s = { id: Date.now(), date: dateKey || todayKey, drops, timestamp: new Date().toISOString() };
-    setSessions([s, ...sessions]); return s;
+  function wasPresent(name,dateKey){ return attendance[dateKey]?.[name]||false; }
+
+  // How many times has a member received a specific item (across all runs)
+  function getItemReceiptCount(memberName,itemName){
+    return runs.reduce((n,run)=>n+(run.received||[]).filter(r=>r.member===memberName&&r.item===itemName).length,0);
   }
-  function deleteSession(id) { setSessions(sessions.filter(s => s.id !== id)); }
-  function addMember(name) { if (!name || members.includes(name)) return false; setMembers([...members, name]); return true; }
-  function removeMember(name) { setMembers(members.filter(m => m !== name)); }
-  function addItem(name) { if (!name || items.includes(name)) return false; setItems([...items, name]); return true; }
-  function removeItem(name) { setItems(items.filter(i => i !== name)); }
 
-  return { members, items, attendance, sessions, todayKey, getActivityScore, getTotalDays, toggleAttendance, addSession, deleteSession, addMember, removeMember, addItem, removeItem };
-}
+  // Priority queue for distributing an item:
+  // Sort: receiptCount ASC → presenceDays DESC → activityPct DESC
+  // If presentOnly=true, only include members present on dateKey
+  function getPriorityQueue(itemName,dateKey,presentOnly=false){
+    let pool=[...members];
+    if(presentOnly&&dateKey) pool=pool.filter(m=>wasPresent(m,dateKey));
+    return pool.map(m=>({
+      name:m, idx:members.indexOf(m),
+      receiptCount:getItemReceiptCount(m,itemName),
+      presenceDays:getPresenceDays(m),
+      activityPct:getActivityPct(m),
+    })).sort((a,b)=>{
+      if(a.receiptCount!==b.receiptCount) return a.receiptCount-b.receiptCount;
+      if(b.presenceDays!==a.presenceDays) return b.presenceDays-a.presenceDays;
+      return b.activityPct-a.activityPct;
+    });
+  }
 
-// ── Componentes base ─────────────────────────────────────────────────
-function Avatar({ name, size=36, index=0 }) {
-  const color = PALETTE[index % PALETTE.length];
-  const initials = name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
-  return <div style={{ width:size, height:size, borderRadius:'50%', background:color+'20', border:`1px solid ${color}40`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:size*0.36, fontWeight:700, color, flexShrink:0, fontFamily:'Syne,sans-serif' }}>{initials}</div>;
-}
+  function saveRun(date,bossId,drops,received){
+    const ex=runs.find(r=>r.date===date&&r.bossId===bossId);
+    if(ex){ sr(runs.map(r=>r.id===ex.id?{...r,drops,received}:r)); }
+    else  { sr([{id:Date.now(),date,bossId,drops,received},...runs]); }
+  }
+  function deleteRun(id){ sr(runs.filter(r=>r.id!==id)); }
 
-function Btn({ children, onClick, variant='default', small, disabled, style={} }) {
-  const base = { display:'inline-flex', alignItems:'center', justifyContent:'center', gap:6, padding:small?'6px 12px':'9px 18px', fontSize:small?12:13, fontWeight:600, borderRadius:'var(--radius-sm)', fontFamily:'Syne,sans-serif', cursor:'pointer', border:'none', opacity: disabled ? 0.4 : 1, ...style };
-  if (variant==='accent') return <button onClick={onClick} disabled={disabled} style={{ ...base, background:'var(--accent)', color:'var(--accent-text)' }}>{children}</button>;
-  if (variant==='danger') return <button onClick={onClick} disabled={disabled} style={{ ...base, background:'var(--red-dim)', color:'var(--red)', border:'1px solid rgba(255,95,95,0.3)' }}>{children}</button>;
-  return <button onClick={onClick} disabled={disabled} style={{ ...base, background:'var(--surface2)', color:'var(--text)', border:'1px solid var(--border)' }}>{children}</button>;
-}
+  function addBoss(name,items){ const b={id:Date.now().toString(),name,items}; sb([...bosses,b]); return b; }
+  function updateBoss(id,name,items){ sb(bosses.map(b=>b.id===id?{...b,name,items}:b)); }
+  function deleteBoss(id){ sb(bosses.filter(b=>b.id!==id)); }
 
-function Card({ children, style={} }) {
-  return <div style={{ background:'var(--surface)', border:'1px solid var(--border)', borderRadius:'var(--radius)', padding:'16px 20px', ...style }}>{children}</div>;
-}
+  function addMember(name){ if(!name||members.includes(name)) return false; sm([...members,name]); return true; }
+  function removeMember(name){ sm(members.filter(m=>m!==name)); }
 
-function SectionTitle({ children }) {
-  return <div style={{ fontFamily:'DM Mono,monospace', fontSize:11, fontWeight:500, color:'var(--text-dim)', textTransform:'uppercase', letterSpacing:'0.08em', margin:'20px 0 10px' }}>{children}</div>;
-}
-
-function ActivityBar({ score }) {
-  const color = score>=70?'var(--accent)':score>=40?'var(--amber)':'var(--red)';
-  return <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-    <div style={{ width:72, height:4, background:'var(--surface2)', borderRadius:2, overflow:'hidden' }}>
-      <div style={{ width:`${score}%`, height:'100%', background:color, borderRadius:2 }} />
-    </div>
-    <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-muted)', minWidth:30 }}>{score}%</span>
-  </div>;
-}
-
-function Badge({ children, variant='default' }) {
-  const s = { default:{ background:'var(--surface2)', color:'var(--text-muted)' }, accent:{ background:'var(--accent-dim)', color:'var(--accent)' }, red:{ background:'var(--red-dim)', color:'var(--red)' }, amber:{ background:'var(--amber-dim)', color:'var(--amber)' } };
-  return <span style={{ fontFamily:'DM Mono', fontSize:11, fontWeight:500, padding:'2px 8px', borderRadius:20, ...s[variant] }}>{children}</span>;
-}
-
-function Row({ children, style={} }) { return <div style={{ display:'flex', alignItems:'center', gap:12, ...style }}>{children}</div>; }
-
-// ── Seletor de data compartilhado ────────────────────────────────────
-function DatePicker({ value, onChange, todayKey }) {
-  const isToday = value === todayKey;
-  const label = isToday ? 'hoje' : value < todayKey ? 'passado' : 'futuro';
-  const labelColor = isToday ? 'var(--accent)' : value < todayKey ? 'var(--amber)' : 'var(--text-muted)';
-  return <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:20 }}>
-    <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-dim)' }}>data da run</span>
-    <input type="date" value={value} onChange={e=>onChange(e.target.value)}
-      style={{ width:'auto', flex:1, maxWidth:180, padding:'6px 10px', fontSize:13 }} />
-    <span style={{ fontFamily:'DM Mono', fontSize:11, padding:'2px 8px', borderRadius:20,
-      background: isToday?'var(--accent-dim)': value<todayKey?'var(--amber-dim)':'var(--surface2)',
-      color: labelColor }}>
-      {label}
-    </span>
-    {!isToday && <button onClick={()=>onChange(todayKey)} style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-muted)', cursor:'pointer', background:'none', border:'1px solid var(--border)', borderRadius:'var(--radius-sm)', padding:'4px 8px' }}>voltar para hoje</button>}
-  </div>;
-}
-
-// ── Aba Presença ──────────────────────────────────────────────────────
-function Presenca({ store, selectedDate, setSelectedDate }) {
-  const { members, todayKey, attendance, getActivityScore, getTotalDays, toggleAttendance } = store;
-  const [saved, setSaved] = useState(false);
-  const dateKey = selectedDate;
-  const day = attendance[dateKey] || {};
-  const presentCount = members.filter(m => day[m]).length;
-  const byActivity = [...members].map((m,i)=>({ name:m, score:getActivityScore(m), idx:i })).sort((a,b)=>b.score-a.score);
-
-  return <div>
-    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:12 }}>
-      <div>
-        <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em' }}>Presença</h1>
-        <p style={{ fontSize:13, color:'var(--text-muted)', marginTop:2 }}>Marque quem esteve presente na run</p>
-      </div>
-      <Btn variant="accent" onClick={()=>{ setSaved(true); setTimeout(()=>setSaved(false),1800); }}>{saved?'✓ Salvo!':'Salvar'}</Btn>
-    </div>
-
-    <DatePicker value={dateKey} onChange={setSelectedDate} todayKey={todayKey} />
-
-    <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:20 }}>
-      {[{ label:'Presentes', value:presentCount, color:'var(--accent)' },{ label:'Ausentes', value:members.length-presentCount, color:'var(--red)' },{ label:'Total', value:members.length, color:'var(--text-muted)' }].map(s=>(
-        <Card key={s.label} style={{ textAlign:'center', padding:'14px 10px' }}>
-          <div style={{ fontSize:28, fontWeight:800, color:s.color }}>{s.value}</div>
-          <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>{s.label}</div>
-        </Card>
-      ))}
-    </div>
-
-    <SectionTitle>Presença — {dateKey}</SectionTitle>
-    <Card style={{ padding:0 }}>
-      {members.map((m,i)=>{
-        const present = day[m] || false;
-        return <div key={m} onClick={()=>toggleAttendance(m,dateKey)} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<members.length-1?'1px solid var(--border)':'none', cursor:'pointer', background:present?'var(--accent-dim)':'transparent', transition:'background 0.15s' }}>
-          <Avatar name={m} index={i} size={34} />
-          <div style={{ flex:1, fontWeight:500, fontSize:14 }}>{m}</div>
-          <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-dim)' }}>{getTotalDays(m)}d</span>
-          <div style={{ width:22, height:22, borderRadius:'50%', border:present?'2px solid var(--accent)':'1px solid var(--border-active)', background:present?'var(--accent)':'transparent', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, color:'var(--accent-text)', transition:'all 0.15s' }}>{present?'✓':''}</div>
-        </div>;
-      })}
-    </Card>
-
-    <SectionTitle>Ranking de atividade geral</SectionTitle>
-    <Card style={{ padding:0 }}>
-      {byActivity.map((item,rank)=>(
-        <div key={item.name} style={{ display:'flex', alignItems:'center', gap:12, padding:'11px 20px', borderBottom:rank<members.length-1?'1px solid var(--border)':'none' }}>
-          <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-dim)', width:18 }}>#{rank+1}</span>
-          <Avatar name={item.name} index={item.idx} size={30} />
-          <span style={{ flex:1, fontSize:13, fontWeight:500 }}>{item.name}</span>
-          <ActivityBar score={item.score} />
-        </div>
-      ))}
-    </Card>
-  </div>;
-}
-
-// ── Aba Drops ─────────────────────────────────────────────────────────
-function Drops({ store, selectedDate, setSelectedDate }) {
-  const { members, items, sessions, addSession, deleteSession, todayKey } = store;
-  const [drops, setDrops] = useState(()=>{ const d={}; items.forEach(i=>d[i]=null); return d; });
-
-  const syncedDrops = {};
-  items.forEach(i => syncedDrops[i] = drops[i] ?? null);
-
-  const setMember = (item, member) => setDrops(prev=>({ ...prev, [item]: member===prev[item]?null:member }));
-  const anyDrop = items.some(i=>syncedDrops[i]);
-
-  const handleSave = () => {
-    const dropList = items.filter(i=>syncedDrops[i]).map(i=>({ item:i, member:syncedDrops[i] }));
-    if (!dropList.length) return;
-    addSession(dropList, selectedDate);
-    const reset={}; items.forEach(i=>reset[i]=null); setDrops(reset);
+  return {
+    members,bosses,attendance,runs,todayKey,
+    toggleAttendance,getPresenceDays,getActivityPct,wasPresent,
+    getItemReceiptCount,getPriorityQueue,
+    saveRun,deleteRun,
+    addBoss,updateBoss,deleteBoss,
+    addMember,removeMember,
   };
+}
 
-  const dateSessions = sessions.filter(s=>s.date===selectedDate);
+// ─── UI Atoms ─────────────────────────────────────────────────────────
+function Avatar({name,size=36,index=0}){
+  const color=PALETTE[index%PALETTE.length];
+  const ini=name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
+  return <div style={{width:size,height:size,borderRadius:'50%',background:color+'20',border:`1px solid ${color}40`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:size*0.36,fontWeight:700,color,flexShrink:0}}>{ini}</div>;
+}
 
-  return <div>
-    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:12 }}>
-      <div>
-        <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em' }}>Drops</h1>
-        <p style={{ fontSize:13, color:'var(--text-muted)', marginTop:2 }}>Marque quem ganhou cada item</p>
-      </div>
-      <Btn variant="accent" onClick={handleSave} disabled={!anyDrop}>Salvar sessão</Btn>
+function Btn({children,onClick,variant='default',small,disabled,full,style={}}){
+  const base={display:'inline-flex',alignItems:'center',justifyContent:'center',gap:6,
+    padding:small?'6px 12px':'9px 18px',fontSize:small?12:13,fontWeight:600,
+    borderRadius:'var(--radius-sm)',fontFamily:'Syne,sans-serif',
+    cursor:disabled?'default':'pointer',border:'none',opacity:disabled?0.4:1,
+    width:full?'100%':'auto',...style};
+  if(variant==='accent') return <button onClick={!disabled?onClick:undefined} style={{...base,background:'var(--accent)',color:'var(--accent-text)'}}>{children}</button>;
+  if(variant==='danger')  return <button onClick={!disabled?onClick:undefined} style={{...base,background:'var(--red-dim)',color:'var(--red)',border:'1px solid rgba(255,95,95,0.3)'}}>{children}</button>;
+  return <button onClick={!disabled?onClick:undefined} style={{...base,background:'var(--surface2)',color:'var(--text)',border:'1px solid var(--border)'}}>{children}</button>;
+}
+
+function Card({children,style={}}){
+  return <div style={{background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius)',padding:'16px 20px',...style}}>{children}</div>;
+}
+
+function ST({children,style={}}){
+  return <div style={{fontFamily:'DM Mono,monospace',fontSize:11,fontWeight:500,color:'var(--text-dim)',textTransform:'uppercase',letterSpacing:'0.08em',margin:'18px 0 8px',...style}}>{children}</div>;
+}
+
+function ActivityBar({score,width=72}){
+  const color=score>=70?'var(--accent)':score>=40?'var(--amber)':'var(--red)';
+  return <div style={{display:'flex',alignItems:'center',gap:8}}>
+    <div style={{width,height:4,background:'var(--surface2)',borderRadius:2,overflow:'hidden'}}>
+      <div style={{width:`${score}%`,height:'100%',background:color,borderRadius:2}}/>
     </div>
-
-    <DatePicker value={selectedDate} onChange={setSelectedDate} todayKey={todayKey} />
-
-    <SectionTitle>Itens desta sessão</SectionTitle>
-    {items.length===0 && <Card style={{ textAlign:'center', color:'var(--text-muted)', fontSize:13, padding:'32px 20px' }}>Nenhum item cadastrado. Vá em Configurar para adicionar.</Card>}
-    {items.map(item=>{
-      const selected = syncedDrops[item];
-      return <Card key={item} style={{ marginBottom:10 }}>
-        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12 }}>
-          <span style={{ fontWeight:700, fontSize:14 }}>{item}</span>
-          {selected ? <Badge variant="accent">✓ {selected}</Badge> : <Badge>sem drop</Badge>}
-        </div>
-        <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
-          {members.map((m,i)=>{
-            const isSel = selected===m;
-            return <button key={m} onClick={()=>setMember(item,m)} style={{ display:'flex', alignItems:'center', gap:6, padding:'5px 10px 5px 6px', borderRadius:20, border:isSel?'1px solid var(--accent)':'1px solid var(--border)', background:isSel?'var(--accent-dim)':'var(--surface2)', color:isSel?'var(--accent)':'var(--text-muted)', fontSize:12, fontWeight:isSel?600:400, fontFamily:'Syne,sans-serif', cursor:'pointer', transition:'all 0.12s' }}>
-              <Avatar name={m} index={i} size={18} />{m}
-            </button>;
-          })}
-        </div>
-      </Card>;
-    })}
-
-    {dateSessions.length>0 && <>
-      <SectionTitle>Sessões salvas em {selectedDate}</SectionTitle>
-      {dateSessions.map(session=>(
-        <Card key={session.id} style={{ marginBottom:10 }}>
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
-            <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-muted)' }}>{new Date(session.timestamp).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</span>
-            <button onClick={()=>deleteSession(session.id)} style={{ fontSize:11, color:'var(--red)', cursor:'pointer', fontFamily:'Syne', background:'none', border:'none' }}>Remover</button>
-          </div>
-          <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
-            {session.drops.map(d=>(
-              <div key={d.item} style={{ display:'flex', alignItems:'center', gap:5, fontSize:12, padding:'4px 10px', background:'var(--surface2)', borderRadius:20, border:'1px solid var(--border)' }}>
-                <span style={{ color:'var(--accent)' }}>◆</span>
-                <span style={{ fontWeight:600 }}>{d.item}</span>
-                <span style={{ color:'var(--text-muted)' }}>→ {d.member}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-      ))}
-    </>}
+    <span style={{fontFamily:'DM Mono',fontSize:11,color:'var(--text-muted)',minWidth:28}}>{score}%</span>
   </div>;
 }
 
-// ── Aba Distribuir ────────────────────────────────────────────────────
-function Distribuir({ store, selectedDate, setSelectedDate }) {
-  const { members, sessions, todayKey, getActivityScore } = store;
-  const dateSessions = sessions.filter(s=>s.date===selectedDate);
-  const allDrops = dateSessions.flatMap(s=>s.drops);
+function Badge({children,variant='default',style={}}){
+  const s={
+    default:{background:'var(--surface2)',color:'var(--text-muted)'},
+    accent:{background:'var(--accent-dim)',color:'var(--accent)'},
+    red:{background:'var(--red-dim)',color:'var(--red)'},
+    amber:{background:'var(--amber-dim)',color:'var(--amber)'},
+    blue:{background:'var(--blue-dim)',color:'var(--blue)'},
+    purple:{background:'var(--purple-dim)',color:'var(--purple)'},
+  };
+  return <span style={{fontFamily:'DM Mono',fontSize:11,fontWeight:500,padding:'2px 8px',borderRadius:20,whiteSpace:'nowrap',...s[variant],...style}}>{children}</span>;
+}
 
-  const memberDrops={};
-  allDrops.forEach(({item,member})=>{ if(!memberDrops[member]) memberDrops[member]=[]; memberDrops[member].push(item); });
-
-  const itemWinners={};
-  allDrops.forEach(({item,member})=>{ if(!itemWinners[item]) itemWinners[item]=[]; itemWinners[item].push(member); });
-
-  const membersWithDrop = new Set(allDrops.map(d=>d.member));
-  const membersWithout = members.filter(m=>!membersWithDrop.has(m));
-  const duplicateItems = Object.entries(itemWinners).filter(([,v])=>v.length>1);
-  const byActivity = [...members].map(m=>({ name:m, score:getActivityScore(m), idx:members.indexOf(m) })).sort((a,b)=>b.score-a.score);
-
-  if (!dateSessions.length) return <div>
-    <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em', marginBottom:4 }}>Distribuir</h1>
-    <p style={{ fontSize:13, color:'var(--text-muted)', marginBottom:12 }}>Sugestões baseadas nos drops e atividade</p>
-    <DatePicker value={selectedDate} onChange={setSelectedDate} todayKey={todayKey} />
-    <Card style={{ textAlign:'center', color:'var(--text-muted)', fontSize:13, padding:'48px 20px' }}>Nenhuma sessão salva em {selectedDate}. Registre os drops primeiro.</Card>
+function DatePicker({value,onChange,todayKey}){
+  const isToday=value===todayKey, isPast=value<todayKey;
+  return <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:16,flexWrap:'wrap'}}>
+    <span style={{fontFamily:'DM Mono',fontSize:11,color:'var(--text-dim)'}}>data</span>
+    <input type="date" value={value} onChange={e=>onChange(e.target.value)} style={{width:'auto',flex:'0 0 auto',padding:'6px 10px',fontSize:13}}/>
+    <Badge variant={isToday?'accent':isPast?'amber':'default'}>{isToday?'hoje':isPast?'passado':'futuro'}</Badge>
+    {!isToday&&<Btn small onClick={()=>onChange(todayKey)}>hoje</Btn>}
   </div>;
+}
+
+// ─── PRESENÇA ─────────────────────────────────────────────────────────
+function Presenca({store,selectedDate,setSelectedDate}){
+  const {members,attendance,todayKey,toggleAttendance,getPresenceDays,getActivityPct}=store;
+  const [saved,setSaved]=useState(false);
+  const day=attendance[selectedDate]||{};
+  const presentCount=members.filter(m=>day[m]).length;
+  const byActivity=[...members].map((m,i)=>({name:m,score:getActivityPct(m),days:getPresenceDays(m),idx:i})).sort((a,b)=>b.score-a.score);
 
   return <div>
-    <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em', marginBottom:4 }}>Distribuir</h1>
-    <p style={{ fontSize:13, color:'var(--text-muted)', marginBottom:12 }}>Sugestões baseadas nos drops e atividade</p>
-    <DatePicker value={selectedDate} onChange={setSelectedDate} todayKey={todayKey} />
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12}}>
+      <div>
+        <h1 style={{fontSize:22,fontWeight:800,letterSpacing:'-0.02em'}}>Presença</h1>
+        <p style={{fontSize:13,color:'var(--text-muted)',marginTop:2}}>Marque quem esteve na run</p>
+      </div>
+      <Btn variant="accent" onClick={()=>{setSaved(true);setTimeout(()=>setSaved(false),1800);}}>{saved?'✓ Salvo!':'Salvar'}</Btn>
+    </div>
 
-    <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:4 }}>
-      {[{ label:'drops hoje', value:allDrops.length, color:'var(--accent)' },{ label:'receberam', value:membersWithDrop.size, color:'var(--text)' },{ label:'sem drop', value:membersWithout.length, color:membersWithout.length>0?'var(--red)':'var(--text-muted)' }].map(s=>(
-        <Card key={s.label} style={{ textAlign:'center', padding:'14px 10px' }}>
-          <div style={{ fontSize:28, fontWeight:800, color:s.color }}>{s.value}</div>
-          <div style={{ fontSize:12, color:'var(--text-muted)', marginTop:2 }}>{s.label}</div>
+    <DatePicker value={selectedDate} onChange={setSelectedDate} todayKey={todayKey}/>
+
+    <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:18}}>
+      {[{l:'Presentes',v:presentCount,c:'var(--accent)'},{l:'Ausentes',v:members.length-presentCount,c:'var(--red)'},{l:'Total',v:members.length,c:'var(--text-muted)'}].map(s=>(
+        <Card key={s.l} style={{textAlign:'center',padding:'14px 10px'}}>
+          <div style={{fontSize:26,fontWeight:800,color:s.c}}>{s.v}</div>
+          <div style={{fontSize:12,color:'var(--text-muted)',marginTop:2}}>{s.l}</div>
         </Card>
       ))}
     </div>
 
-    <SectionTitle>Resumo dos drops</SectionTitle>
-    <Card style={{ padding:0 }}>
-      {byActivity.map((item,i)=>{
-        const d = memberDrops[item.name]||[];
-        return <div key={item.name} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<members.length-1?'1px solid var(--border)':'none' }}>
-          <Avatar name={item.name} index={item.idx} size={32} />
-          <div style={{ flex:1 }}>
-            <div style={{ fontSize:13, fontWeight:600 }}>{item.name}</div>
-            <div style={{ marginTop:4, display:'flex', flexWrap:'wrap', gap:4 }}>
-              {d.length===0 ? <Badge variant="red">sem drop</Badge> : d.map(x=><Badge key={x} variant="accent">{x}</Badge>)}
-            </div>
-          </div>
-          <ActivityBar score={item.score} />
+    <ST style={{marginTop:0}}>Presença — {selectedDate}</ST>
+    <Card style={{padding:0}}>
+      {members.map((m,i)=>{
+        const present=day[m]||false;
+        return <div key={m} onClick={()=>toggleAttendance(m,selectedDate)} style={{display:'flex',alignItems:'center',gap:12,padding:'12px 20px',borderBottom:i<members.length-1?'1px solid var(--border)':'none',cursor:'pointer',background:present?'var(--accent-dim)':'transparent',transition:'background 0.15s'}}>
+          <Avatar name={m} index={i} size={34}/>
+          <div style={{flex:1,fontWeight:500,fontSize:14}}>{m}</div>
+          <span style={{fontFamily:'DM Mono',fontSize:11,color:'var(--text-dim)',marginRight:8}}>{getPresenceDays(m)}d</span>
+          <div style={{width:22,height:22,borderRadius:'50%',border:present?'2px solid var(--accent)':'1px solid var(--border-active)',background:present?'var(--accent)':'transparent',display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,color:'var(--accent-text)',transition:'all 0.15s'}}>{present?'✓':''}</div>
         </div>;
       })}
     </Card>
 
-    {membersWithout.length>0 && <>
-      <SectionTitle>Sem drop — ordem de prioridade</SectionTitle>
-      <Card style={{ padding:0 }}>
-        {membersWithout.map(m=>({ name:m, score:getActivityScore(m), idx:members.indexOf(m) })).sort((a,b)=>b.score-a.score).map((item,i,arr)=>(
-          <div key={item.name} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<arr.length-1?'1px solid var(--border)':'none', background:i===0?'var(--accent-dim)':'transparent' }}>
-            <span style={{ fontFamily:'DM Mono', fontSize:11, color:i===0?'var(--accent)':'var(--text-dim)', width:20 }}>#{i+1}</span>
-            <Avatar name={item.name} index={item.idx} size={32} />
-            <span style={{ flex:1, fontSize:13, fontWeight:i===0?700:500 }}>{item.name}</span>
-            <ActivityBar score={item.score} />
-            {i===0 && <Badge variant="accent">prioridade</Badge>}
-          </div>
-        ))}
-      </Card>
-    </>}
+    <ST>Ranking de atividade</ST>
+    <Card style={{padding:0}}>
+      {byActivity.map((item,rank)=>(
+        <div key={item.name} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 20px',borderBottom:rank<members.length-1?'1px solid var(--border)':'none'}}>
+          <span style={{fontFamily:'DM Mono',fontSize:11,color:'var(--text-dim)',width:20}}>#{rank+1}</span>
+          <Avatar name={item.name} index={item.idx} size={28}/>
+          <span style={{flex:1,fontSize:13,fontWeight:500}}>{item.name}</span>
+          <span style={{fontFamily:'DM Mono',fontSize:11,color:'var(--text-dim)',marginRight:4}}>{item.days}d</span>
+          <ActivityBar score={item.score}/>
+        </div>
+      ))}
+    </Card>
+  </div>;
+}
 
-    {duplicateItems.length>0 && <>
-      <SectionTitle>Itens repetidos — sugestão de redistribuição</SectionTitle>
-      {duplicateItems.map(([item,winners])=>{
-        const extras = winners.slice(1);
-        const candidates = membersWithout.map(m=>({ name:m, score:getActivityScore(m), idx:members.indexOf(m) })).sort((a,b)=>b.score-a.score).slice(0,extras.length);
-        return <Card key={item} style={{ marginBottom:10 }}>
-          <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12 }}>
-            <span style={{ color:'var(--accent)', fontSize:14 }}>◆</span>
-            <span style={{ fontWeight:700, fontSize:14 }}>{item}</span>
-            <Badge variant="amber">{winners.length}x dropado</Badge>
+// ─── RUN ──────────────────────────────────────────────────────────────
+function Run({store,selectedDate,setSelectedDate}){
+  const {members,bosses,runs,todayKey,wasPresent,getPriorityQueue,getItemReceiptCount,saveRun,deleteRun}=store;
+  const [selectedBossId,setBossId]=useState('');
+  const [step,setStep]=useState('drops'); // drops | distribute | saved
+  const [drops,setDrops]=useState({});    // {item: memberName|null}
+  const [received,setReceived]=useState({});
+
+  const boss=bosses.find(b=>b.id===selectedBossId);
+  const existingRun=runs.find(r=>r.date===selectedDate&&r.bossId===selectedBossId);
+
+  function resetFromExisting(b,exRun){
+    const d={},rc={};
+    b.items.forEach(item=>{
+      const drop=exRun.drops.find(x=>x.item===item);
+      d[item]=drop?drop.droppedBy:null;
+      const recv=exRun.received.find(x=>x.item===item);
+      rc[item]=recv?recv.member:null;
+    });
+    setDrops(d);setReceived(rc);setStep('saved');
+  }
+
+  function resetEmpty(b){
+    const d={};b.items.forEach(i=>d[i]=null);
+    setDrops(d);setReceived({});setStep('drops');
+  }
+
+  function handleBossChange(id){
+    setBossId(id);
+    const b=bosses.find(x=>x.id===id);
+    if(!b){setDrops({});setReceived({});setStep('drops');return;}
+    const ex=runs.find(r=>r.date===selectedDate&&r.bossId===id);
+    ex?resetFromExisting(b,ex):resetEmpty(b);
+  }
+
+  function handleDateChange(date){
+    setSelectedDate(date);
+    if(!boss){return;}
+    const ex=runs.find(r=>r.date===date&&r.bossId===selectedBossId);
+    ex?resetFromExisting(boss,ex):resetEmpty(boss);
+  }
+
+  const droppedItems=boss?boss.items.filter(item=>drops[item]):[];
+
+  // Auto-suggestions: who should receive each dropped item
+  const suggestions=useMemo(()=>{
+    if(!boss) return {};
+    const sugg={};
+    droppedItems.forEach(item=>{
+      const dropper=drops[item];
+      const dropperCount=getItemReceiptCount(dropper,item);
+      if(dropperCount===0){
+        sugg[item]=dropper; // dropper never received — they get it
+      } else {
+        const queue=getPriorityQueue(item,selectedDate,true);
+        sugg[item]=queue[0]?.name||dropper;
+      }
+    });
+    return sugg;
+  },[boss,droppedItems.join(','),selectedDate,JSON.stringify(drops)]);
+
+  function handleGoDistribute(){
+    const rc={};
+    droppedItems.forEach(item=>{rc[item]=suggestions[item]||null;});
+    setReceived(rc);setStep('distribute');
+  }
+
+  function handleSave(){
+    const dropsList=droppedItems.map(item=>({item,droppedBy:drops[item]}));
+    const recvList=droppedItems.filter(item=>received[item]).map(item=>({item,member:received[item],reason:received[item]===drops[item]?'dropped':'distributed'}));
+    saveRun(selectedDate,selectedBossId,dropsList,recvList);
+    setStep('saved');
+  }
+
+  function handleEdit(){
+    if(boss) resetEmpty(boss);
+  }
+
+  if(bosses.length===0) return <div>
+    <h1 style={{fontSize:22,fontWeight:800,letterSpacing:'-0.02em',marginBottom:4}}>Run</h1>
+    <Card style={{textAlign:'center',color:'var(--text-muted)',fontSize:13,padding:'48px 20px',marginTop:20}}>
+      Nenhum boss cadastrado.<br/>Vá em <strong style={{color:'var(--text)'}}>Configurar</strong> para adicionar bosses e seus itens.
+    </Card>
+  </div>;
+
+  return <div>
+    <h1 style={{fontSize:22,fontWeight:800,letterSpacing:'-0.02em',marginBottom:4}}>Run</h1>
+    <p style={{fontSize:13,color:'var(--text-muted)',marginBottom:12}}>Registre os drops e distribua as recompensas</p>
+
+    <DatePicker value={selectedDate} onChange={handleDateChange} todayKey={todayKey}/>
+
+    <ST style={{marginTop:0}}>Selecione o boss</ST>
+    <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
+      {bosses.map(b=>{
+        const isSel=selectedBossId===b.id;
+        const hasRun=!!runs.find(r=>r.date===selectedDate&&r.bossId===b.id);
+        return <button key={b.id} onClick={()=>handleBossChange(b.id)} style={{
+          padding:'7px 14px',borderRadius:'var(--radius-sm)',fontSize:13,fontWeight:600,
+          fontFamily:'Syne,sans-serif',cursor:'pointer',transition:'all 0.15s',
+          border:isSel?'1px solid var(--accent)':'1px solid var(--border)',
+          background:isSel?'var(--accent-dim)':'var(--surface2)',
+          color:isSel?'var(--accent)':'var(--text-muted)',
+          position:'relative',
+        }}>
+          {b.name}
+          {hasRun&&<span style={{fontFamily:'DM Mono',fontSize:9,marginLeft:5,color:isSel?'var(--accent)':'var(--accent)',opacity:0.7}}>✓</span>}
+        </button>;
+      })}
+    </div>
+
+    {!boss&&<Card style={{textAlign:'center',color:'var(--text-muted)',fontSize:13,padding:'32px 20px'}}>Selecione um boss acima para começar.</Card>}
+
+    {/* ── STEP: DROPS ── */}
+    {boss&&step==='drops'&&<>
+      <ST>Quem dropou cada item?</ST>
+      <p style={{fontSize:12,color:'var(--text-muted)',marginBottom:12}}>Membros esmaecidos = ausentes nesta data. Itens sem marcação serão ignorados.</p>
+      {boss.items.map(item=>{
+        const sel=drops[item];
+        return <Card key={item} style={{marginBottom:10}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+            <span style={{fontWeight:700,fontSize:14}}>◆ {item}</span>
+            {sel?<Badge variant="accent">✓ {sel}</Badge>:<Badge>sem drop</Badge>}
           </div>
-          <div style={{ fontSize:12, color:'var(--text-muted)', marginBottom:10 }}>Receberam: {winners.join(', ')}</div>
-          {candidates.length>0 ? candidates.map((c,ci)=>(
-            <div key={c.name} style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 12px', borderRadius:'var(--radius-sm)', background:'var(--surface2)', border:'1px solid var(--border)', marginBottom:6 }}>
-              <span style={{ fontFamily:'DM Mono', fontSize:11, color:'var(--text-dim)' }}>#{ci+1}</span>
-              <Avatar name={c.name} index={c.idx} size={26} />
-              <span style={{ flex:1, fontSize:13, fontWeight:600 }}>{c.name}</span>
-              <ActivityBar score={c.score} />
-            </div>
-          )) : <div style={{ fontSize:12, color:'var(--text-muted)' }}>Todos já receberam um drop hoje.</div>}
+          <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+            {members.map((m,i)=>{
+              const isSel=sel===m;
+              const present=wasPresent(m,selectedDate);
+              return <button key={m} onClick={()=>setDrops(prev=>({...prev,[item]:isSel?null:m}))} style={{
+                display:'flex',alignItems:'center',gap:5,padding:'4px 10px 4px 5px',borderRadius:20,
+                border:isSel?'1px solid var(--accent)':'1px solid var(--border)',
+                background:isSel?'var(--accent-dim)':'var(--surface2)',
+                color:isSel?'var(--accent)':present?'var(--text-muted)':'var(--text-dim)',
+                fontSize:12,fontWeight:isSel?600:400,fontFamily:'Syne,sans-serif',cursor:'pointer',opacity:present?1:0.5,
+              }}>
+                <Avatar name={m} index={i} size={18}/>{m}
+              </button>;
+            })}
+          </div>
         </Card>;
       })}
+      <div style={{display:'flex',justifyContent:'flex-end',marginTop:14}}>
+        <Btn variant="accent" onClick={handleGoDistribute} disabled={droppedItems.length===0}>Distribuir →</Btn>
+      </div>
     </>}
 
-    {membersWithout.length===0 && duplicateItems.length===0 && (
-      <Card style={{ textAlign:'center', padding:'32px 20px', marginTop:10 }}>
-        <div style={{ fontSize:28, marginBottom:8 }}>🎉</div>
-        <div style={{ fontWeight:700 }}>Todos receberam suas recompensas!</div>
-        <div style={{ fontSize:13, color:'var(--text-muted)', marginTop:4 }}>Nenhuma redistribuição necessária.</div>
+    {/* ── STEP: DISTRIBUTE ── */}
+    {boss&&step==='distribute'&&<>
+      <ST>Distribuição — quem recebe cada item?</ST>
+      <p style={{fontSize:12,color:'var(--text-muted)',marginBottom:12}}>
+        ★ = sugestão automática. Ordem: menos vezes recebeu → mais dias presente. Ajuste se precisar.
+      </p>
+
+      {droppedItems.map(item=>{
+        const dropper=drops[item];
+        const recvMember=received[item];
+        const queuePresent=getPriorityQueue(item,selectedDate,true);
+
+        return <Card key={item} style={{marginBottom:12}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+            <span style={{fontWeight:800,fontSize:15}}>◆ {item}</span>
+            <Badge variant="blue">dropou: {dropper}</Badge>
+          </div>
+
+          {/* Fila de prioridade */}
+          <div style={{marginBottom:12,padding:'8px 12px',background:'var(--surface2)',borderRadius:'var(--radius-sm)',border:'1px solid var(--border)'}}>
+            <div style={{fontFamily:'DM Mono',fontSize:10,color:'var(--text-dim)',marginBottom:6,textTransform:'uppercase',letterSpacing:'0.06em'}}>Fila (presentes nesta data)</div>
+            {queuePresent.length===0
+              ? <span style={{fontSize:12,color:'var(--text-dim)'}}>Nenhum presente registrado</span>
+              : <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
+                  {queuePresent.map((p,pi)=>{
+                    const count=getItemReceiptCount(p.name,item);
+                    const isSugg=suggestions[item]===p.name;
+                    return <div key={p.name} style={{display:'flex',alignItems:'center',gap:4,padding:'3px 8px 3px 4px',borderRadius:20,background:isSugg?'var(--accent-dim)':'var(--bg)',border:isSugg?'1px solid rgba(200,240,74,0.4)':'1px solid var(--border)'}}>
+                      <span style={{fontFamily:'DM Mono',fontSize:9,color:isSugg?'var(--accent)':'var(--text-dim)'}}>{isSugg?'★':`#${pi+1}`}</span>
+                      <Avatar name={p.name} index={p.idx} size={16}/>
+                      <span style={{fontSize:11,fontWeight:isSugg?700:400,color:isSugg?'var(--accent)':'var(--text-muted)'}}>{p.name}</span>
+                      {count>0&&<span style={{fontFamily:'DM Mono',fontSize:9,color:'var(--amber)'}}>{count}x</span>}
+                    </div>;
+                  })}
+                </div>
+            }
+          </div>
+
+          {/* Seleção manual */}
+          <div style={{fontFamily:'DM Mono',fontSize:10,color:'var(--text-dim)',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:8}}>Confirmar quem recebe</div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+            {members.map((m,i)=>{
+              const isSel=recvMember===m;
+              const count=getItemReceiptCount(m,item);
+              const isSugg=suggestions[item]===m;
+              return <button key={m} onClick={()=>setReceived(prev=>({...prev,[item]:isSel?null:m}))} style={{
+                display:'flex',alignItems:'center',gap:5,padding:'5px 10px 5px 5px',borderRadius:20,
+                border:isSel?'1px solid var(--accent)':isSugg?'1px solid rgba(200,240,74,0.35)':'1px solid var(--border)',
+                background:isSel?'var(--accent-dim)':isSugg?'rgba(200,240,74,0.06)':'var(--surface2)',
+                color:isSel?'var(--accent)':'var(--text-muted)',
+                fontSize:12,fontWeight:isSel?600:400,fontFamily:'Syne,sans-serif',cursor:'pointer',transition:'all 0.12s',
+              }}>
+                <Avatar name={m} index={i} size={18}/>
+                {m}
+                {count>0&&<span style={{fontFamily:'DM Mono',fontSize:10,color:isSel?'var(--accent)':'var(--amber)',opacity:0.8}}>{count}x</span>}
+                {isSugg&&!isSel&&<span style={{fontSize:9,color:'var(--accent)',opacity:0.6}}>★</span>}
+              </button>;
+            })}
+          </div>
+        </Card>;
+      })}
+
+      <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:14}}>
+        <Btn onClick={()=>setStep('drops')}>← Voltar</Btn>
+        <Btn variant="accent" onClick={handleSave}>Salvar run</Btn>
+      </div>
+    </>}
+
+    {/* ── STEP: SAVED ── */}
+    {boss&&step==='saved'&&existingRun&&<>
+      <ST>Run salva — {selectedDate}</ST>
+      <Card>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+          <span style={{fontWeight:700,fontSize:15}}>{boss.name}</span>
+          <div style={{display:'flex',gap:6}}>
+            <Btn small onClick={handleEdit}>Editar</Btn>
+            <Btn small variant="danger" onClick={()=>{deleteRun(existingRun.id);resetEmpty(boss);}}>Apagar</Btn>
+          </div>
+        </div>
+        {existingRun.drops.map((drop,i)=>{
+          const recv=existingRun.received.find(r=>r.item===drop.item);
+          return <div key={drop.item} style={{padding:'10px 0',borderBottom:i<existingRun.drops.length-1?'1px solid var(--border)':'none'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+              <span style={{fontWeight:700,fontSize:13}}>◆ {drop.item}</span>
+              <Badge variant="blue">dropou: {drop.droppedBy}</Badge>
+              {recv&&<><span style={{color:'var(--text-dim)',fontSize:12}}>→</span><Badge variant={recv.reason==='dropped'?'accent':'purple'}>recebeu: {recv.member} {recv.reason==='distributed'?'(redistribuído)':''}</Badge></>}
+              {!recv&&<Badge variant="red">não distribuído</Badge>}
+            </div>
+          </div>;
+        })}
       </Card>
-    )}
+    </>}
   </div>;
 }
 
-// ── Aba Configurar ────────────────────────────────────────────────────
-function Configurar({ store }) {
-  const { members, items, addMember, removeMember, addItem, removeItem, getActivityScore } = store;
-  const [newMember, setNewMember] = useState('');
-  const [newItem,   setNewItem]   = useState('');
-  const [memberErr, setMemberErr] = useState('');
-  const [itemErr,   setItemErr]   = useState('');
+// ─── HISTÓRICO ────────────────────────────────────────────────────────
+function Historico({store}){
+  const {runs,bosses,members,getItemReceiptCount}=store;
+  const [filterMember,setFilterMember]=useState('');
+  const [filterBoss,setFilterBoss]=useState('');
 
-  const handleAddMember = () => {
-    if (!newMember.trim()) return;
-    if (!addMember(newMember.trim())) { setMemberErr('Membro já existe'); return; }
-    setNewMember(''); setMemberErr('');
-  };
-  const handleAddItem = () => {
-    if (!newItem.trim()) return;
-    if (!addItem(newItem.trim())) { setItemErr('Item já existe'); return; }
-    setNewItem(''); setItemErr('');
-  };
+  const allItems=[...new Set(bosses.flatMap(b=>b.items))];
+
+  const filtered=runs.filter(r=>{
+    if(filterBoss&&r.bossId!==filterBoss) return false;
+    if(filterMember){
+      const involved=[...r.drops.map(d=>d.droppedBy),...(r.received||[]).map(x=>x.member)];
+      if(!involved.includes(filterMember)) return false;
+    }
+    return true;
+  }).sort((a,b)=>b.date.localeCompare(a.date));
 
   return <div>
-    <h1 style={{ fontSize:22, fontWeight:800, letterSpacing:'-0.02em', marginBottom:4 }}>Configurar</h1>
-    <p style={{ fontSize:13, color:'var(--text-muted)', marginBottom:20 }}>Gerencie membros e itens de recompensa</p>
+    <h1 style={{fontSize:22,fontWeight:800,letterSpacing:'-0.02em',marginBottom:4}}>Histórico</h1>
+    <p style={{fontSize:13,color:'var(--text-muted)',marginBottom:16}}>Todas as runs e totais de recebimento por item</p>
 
-    <SectionTitle>Itens de recompensa ({items.length})</SectionTitle>
-    <Card style={{ marginBottom:10 }}>
-      <div style={{ display:'flex', gap:8 }}>
-        <input value={newItem} onChange={e=>{setNewItem(e.target.value);setItemErr('');}} onKeyDown={e=>e.key==='Enter'&&handleAddItem()} placeholder="Nome do item..." style={{ flex:1 }} />
-        <Btn variant="accent" onClick={handleAddItem} small>Adicionar</Btn>
+    {allItems.length>0&&members.length>0&&<>
+      <ST style={{marginTop:0}}>Totais recebidos por item</ST>
+      <div style={{overflowX:'auto',marginBottom:4}}>
+        <table style={{borderCollapse:'collapse',fontSize:12,minWidth:'100%'}}>
+          <thead>
+            <tr style={{borderBottom:'1px solid var(--border)'}}>
+              <th style={{textAlign:'left',padding:'8px 12px',fontWeight:600,color:'var(--text-muted)',whiteSpace:'nowrap',background:'var(--surface)',position:'sticky',left:0}}>Membro</th>
+              {allItems.map(item=>(
+                <th key={item} style={{textAlign:'center',padding:'8px 10px',fontWeight:500,color:'var(--text-muted)',fontFamily:'DM Mono',fontSize:10,whiteSpace:'nowrap'}}>
+                  {item.length>12?item.slice(0,11)+'…':item}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {members.map((m,i)=>(
+              <tr key={m} style={{borderBottom:'1px solid var(--border)'}}>
+                <td style={{padding:'8px 12px',whiteSpace:'nowrap',background:'var(--surface)',position:'sticky',left:0}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6}}>
+                    <Avatar name={m} index={i} size={20}/>
+                    <span style={{fontWeight:500,fontSize:12}}>{m}</span>
+                  </div>
+                </td>
+                {allItems.map(item=>{
+                  const count=getItemReceiptCount(m,item);
+                  return <td key={item} style={{textAlign:'center',padding:'8px',fontFamily:'DM Mono',fontSize:12}}>
+                    {count>0
+                      ? <span style={{color:count===1?'var(--accent)':count===2?'var(--amber)':'var(--red)',fontWeight:700}}>{count}</span>
+                      : <span style={{color:'var(--text-dim)'}}>—</span>
+                    }
+                  </td>;
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-      {itemErr && <div style={{ fontSize:12, color:'var(--red)', marginTop:6 }}>{itemErr}</div>}
+      <p style={{fontSize:11,color:'var(--text-dim)',fontFamily:'DM Mono',marginBottom:4}}>
+        verde=1x · laranja=2x · vermelho=3x+
+      </p>
+    </>}
+
+    <ST>Filtros</ST>
+    <div style={{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap'}}>
+      <select value={filterBoss} onChange={e=>setFilterBoss(e.target.value)} style={{flex:1,minWidth:140}}>
+        <option value="">Todos os bosses</option>
+        {bosses.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}
+      </select>
+      <select value={filterMember} onChange={e=>setFilterMember(e.target.value)} style={{flex:1,minWidth:140}}>
+        <option value="">Todos os membros</option>
+        {members.map(m=><option key={m} value={m}>{m}</option>)}
+      </select>
+    </div>
+
+    {filtered.length===0&&<Card style={{textAlign:'center',color:'var(--text-muted)',fontSize:13,padding:'32px 20px'}}>Nenhuma run encontrada.</Card>}
+    {filtered.map(run=>{
+      const boss=bosses.find(b=>b.id===run.bossId);
+      return <Card key={run.id} style={{marginBottom:10}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+          <span style={{fontWeight:700,fontSize:14}}>{boss?.name||'Boss removido'}</span>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <span style={{fontFamily:'DM Mono',fontSize:11,color:'var(--text-muted)'}}>{run.date}</span>
+            <Badge>{run.drops.length} drops</Badge>
+          </div>
+        </div>
+        {(run.drops||[]).map((drop,i)=>{
+          const recv=(run.received||[]).find(r=>r.item===drop.item);
+          return <div key={drop.item} style={{display:'flex',alignItems:'center',gap:6,padding:'6px 0',flexWrap:'wrap',borderBottom:i<run.drops.length-1?'1px solid var(--border)':'none'}}>
+            <span style={{fontSize:12,fontWeight:700}}>◆ {drop.item}</span>
+            <Badge variant="blue">dropou: {drop.droppedBy}</Badge>
+            {recv&&<><span style={{color:'var(--text-dim)',fontSize:11}}>→</span><Badge variant={recv.reason==='dropped'?'accent':'purple'}>recebeu: {recv.member}</Badge></>}
+            {!recv&&<Badge variant="red">não distribuído</Badge>}
+          </div>;
+        })}
+      </Card>;
+    })}
+  </div>;
+}
+
+// ─── CONFIGURAR ───────────────────────────────────────────────────────
+function Configurar({store}){
+  const {members,bosses,addMember,removeMember,addBoss,updateBoss,deleteBoss,getActivityPct}=store;
+  const [newMember,setNewMember]=useState('');
+  const [memberErr,setMemberErr]=useState('');
+  const [editingBoss,setEditingBoss]=useState(null); // null | 'new' | bossObj
+  const [bossName,setBossName]=useState('');
+  const [bossItems,setBossItems]=useState([]);
+  const [newItem,setNewItem]=useState('');
+
+  const openNew=()=>{setEditingBoss('new');setBossName('');setBossItems([]);setNewItem('');};
+  const openEdit=b=>{setEditingBoss(b);setBossName(b.name);setBossItems([...b.items]);setNewItem('');};
+  const closeEdit=()=>{setEditingBoss(null);};
+
+  const handleSaveBoss=()=>{
+    if(!bossName.trim()||!bossItems.length) return;
+    if(editingBoss==='new') addBoss(bossName.trim(),bossItems);
+    else updateBoss(editingBoss.id,bossName.trim(),bossItems);
+    closeEdit();
+  };
+
+  const addBossItem=()=>{
+    const v=newItem.trim();
+    if(!v||bossItems.includes(v)) return;
+    setBossItems([...bossItems,v]); setNewItem('');
+  };
+
+  const handleAddMember=()=>{
+    if(!addMember(newMember.trim())){setMemberErr('Já existe');return;}
+    setNewMember('');setMemberErr('');
+  };
+
+  if(editingBoss!==null) return <div>
+    <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:20}}>
+      <Btn onClick={closeEdit}>← Voltar</Btn>
+      <h1 style={{fontSize:20,fontWeight:800}}>{editingBoss==='new'?'Novo boss':'Editar boss'}</h1>
+    </div>
+    <ST style={{marginTop:0}}>Nome do boss</ST>
+    <input value={bossName} onChange={e=>setBossName(e.target.value)} placeholder="Ex: Baphomet, Thanatos..." style={{marginBottom:16}}/>
+    <ST>Itens possíveis ({bossItems.length})</ST>
+    <div style={{display:'flex',gap:8,marginBottom:10}}>
+      <input value={newItem} onChange={e=>setNewItem(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addBossItem()} placeholder="Nome do item..." style={{flex:1}}/>
+      <Btn variant="accent" small onClick={addBossItem}>Adicionar</Btn>
+    </div>
+    <Card style={{padding:0,marginBottom:20}}>
+      {bossItems.length===0&&<div style={{padding:'16px',color:'var(--text-dim)',fontSize:13,textAlign:'center'}}>Nenhum item adicionado</div>}
+      {bossItems.map((item,i)=>(
+        <div key={item} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',borderBottom:i<bossItems.length-1?'1px solid var(--border)':'none'}}>
+          <span style={{width:8,height:8,borderRadius:2,background:'var(--accent)',display:'inline-block',flexShrink:0}}/>
+          <span style={{flex:1,fontSize:13,fontWeight:500}}>{item}</span>
+          <button onClick={()=>setBossItems(bossItems.filter(x=>x!==item))} style={{fontSize:12,color:'var(--red)',fontFamily:'Syne',cursor:'pointer',background:'none',border:'none'}}>Remover</button>
+        </div>
+      ))}
     </Card>
-    {items.length===0
-      ? <Card style={{ textAlign:'center', color:'var(--text-muted)', fontSize:13, padding:'24px 20px' }}>Nenhum item cadastrado.</Card>
-      : <Card style={{ padding:0 }}>
-          {items.map((item,i)=>(
-            <div key={item} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<items.length-1?'1px solid var(--border)':'none' }}>
-              <div style={{ width:8, height:8, borderRadius:2, background:'var(--accent)', flexShrink:0 }} />
-              <span style={{ flex:1, fontSize:14, fontWeight:500 }}>{item}</span>
-              <button onClick={()=>removeItem(item)} style={{ fontSize:12, color:'var(--red)', cursor:'pointer', background:'none', border:'none', fontFamily:'Syne', padding:'4px 8px', borderRadius:'var(--radius-sm)' }}>Remover</button>
+    <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+      <Btn onClick={closeEdit}>Cancelar</Btn>
+      <Btn variant="accent" onClick={handleSaveBoss} disabled={!bossName.trim()||!bossItems.length}>Salvar</Btn>
+    </div>
+  </div>;
+
+  return <div>
+    <h1 style={{fontSize:22,fontWeight:800,letterSpacing:'-0.02em',marginBottom:4}}>Configurar</h1>
+    <p style={{fontSize:13,color:'var(--text-muted)',marginBottom:20}}>Bosses, itens e membros do grupo</p>
+
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+      <ST style={{marginTop:0,marginBottom:0}}>Bosses ({bosses.length})</ST>
+      <Btn variant="accent" small onClick={openNew}>+ Novo boss</Btn>
+    </div>
+    <div style={{height:10}}/>
+    {bosses.length===0
+      ? <Card style={{textAlign:'center',color:'var(--text-muted)',fontSize:13,padding:'24px 20px',marginBottom:16}}>Nenhum boss cadastrado.</Card>
+      : <Card style={{padding:0,marginBottom:16}}>
+          {bosses.map((b,i)=>(
+            <div key={b.id} style={{display:'flex',alignItems:'center',gap:10,padding:'12px 20px',borderBottom:i<bosses.length-1?'1px solid var(--border)':'none'}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:700,fontSize:14}}>{b.name}</div>
+                <div style={{fontSize:11,color:'var(--text-muted)',fontFamily:'DM Mono',marginTop:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{b.items.join(' · ')}</div>
+              </div>
+              <Btn small onClick={()=>openEdit(b)}>Editar</Btn>
+              <Btn small variant="danger" onClick={()=>deleteBoss(b.id)}>Del</Btn>
             </div>
           ))}
         </Card>
     }
 
-    <SectionTitle>Membros do grupo ({members.length})</SectionTitle>
-    <Card style={{ marginBottom:10 }}>
-      <div style={{ display:'flex', gap:8 }}>
-        <input value={newMember} onChange={e=>{setNewMember(e.target.value);setMemberErr('');}} onKeyDown={e=>e.key==='Enter'&&handleAddMember()} placeholder="Nome do membro..." style={{ flex:1 }} />
-        <Btn variant="accent" onClick={handleAddMember} small>Adicionar</Btn>
+    <ST>Membros ({members.length})</ST>
+    <Card style={{marginBottom:10}}>
+      <div style={{display:'flex',gap:8}}>
+        <input value={newMember} onChange={e=>{setNewMember(e.target.value);setMemberErr('');}} onKeyDown={e=>e.key==='Enter'&&handleAddMember()} placeholder="Nome do membro..." style={{flex:1}}/>
+        <Btn variant="accent" small onClick={handleAddMember}>Adicionar</Btn>
       </div>
-      {memberErr && <div style={{ fontSize:12, color:'var(--red)', marginTop:6 }}>{memberErr}</div>}
+      {memberErr&&<div style={{fontSize:12,color:'var(--red)',marginTop:6}}>{memberErr}</div>}
     </Card>
-    <Card style={{ padding:0 }}>
+    <Card style={{padding:0}}>
       {members.map((m,i)=>(
-        <div key={m} style={{ display:'flex', alignItems:'center', gap:12, padding:'12px 20px', borderBottom:i<members.length-1?'1px solid var(--border)':'none' }}>
-          <Avatar name={m} index={i} size={32} />
-          <span style={{ flex:1, fontSize:13, fontWeight:600 }}>{m}</span>
-          <ActivityBar score={getActivityScore(m)} />
-          <button onClick={()=>removeMember(m)} style={{ fontSize:12, color:'var(--red)', cursor:'pointer', background:'none', border:'none', fontFamily:'Syne', padding:'4px 8px' }}>Remover</button>
+        <div key={m} style={{display:'flex',alignItems:'center',gap:12,padding:'10px 20px',borderBottom:i<members.length-1?'1px solid var(--border)':'none'}}>
+          <Avatar name={m} index={i} size={30}/>
+          <span style={{flex:1,fontSize:13,fontWeight:600}}>{m}</span>
+          <ActivityBar score={getActivityPct(m)} width={60}/>
+          <button onClick={()=>removeMember(m)} style={{fontSize:12,color:'var(--red)',fontFamily:'Syne',cursor:'pointer',background:'none',border:'none',padding:'4px 6px'}}>Remover</button>
         </div>
       ))}
     </Card>
 
-    <div style={{ marginTop:32, padding:'16px 20px', background:'var(--surface)', border:'1px solid var(--border)', borderRadius:'var(--radius)', fontSize:12, color:'var(--text-muted)', fontFamily:'DM Mono' }}>
-      <div style={{ fontWeight:500, color:'var(--text-dim)', marginBottom:6 }}>// dados salvos localmente</div>
-      Todos os dados persistem no localStorage do navegador entre sessões.
+    <div style={{marginTop:28,padding:'14px 18px',background:'var(--surface)',border:'1px solid var(--border)',borderRadius:'var(--radius)',fontSize:12,color:'var(--text-muted)',fontFamily:'DM Mono'}}>
+      <div style={{fontWeight:500,color:'var(--text-dim)',marginBottom:4}}>// armazenamento local</div>
+      Dados salvos no localStorage. Persistem entre sessões no mesmo dispositivo.
     </div>
   </div>;
 }
 
-// ── App principal ─────────────────────────────────────────────────────
-const TABS = [{ id:'presenca', label:'Presença' },{ id:'drops', label:'Drops' },{ id:'distribuir', label:'Distribuir' },{ id:'config', label:'Configurar' }];
+// ─── APP ──────────────────────────────────────────────────────────────
+const TABS=[{id:'presenca',label:'Presença'},{id:'run',label:'Run'},{id:'historico',label:'Histórico'},{id:'config',label:'Configurar'}];
 
-function App() {
-  const [tab, setTab] = useState('presenca');
-  const store = useStore();
-  const [selectedDate, setSelectedDate] = useState(store.todayKey);
+function App(){
+  const [tab,setTab]=useState('presenca');
+  const store=useStore();
+  const [selectedDate,setSelectedDate]=useState(store.todayKey);
 
-  return <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column' }}>
-    <header style={{ borderBottom:'1px solid var(--border)', padding:'0 24px', display:'flex', alignItems:'center', justifyContent:'space-between', height:60, flexShrink:0 }}>
-      <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-        <div style={{ width:28, height:28, borderRadius:6, background:'var(--accent)', display:'flex', alignItems:'center', justifyContent:'center' }}>
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><polygon points="7,1 13,5 13,9 7,13 1,9 1,5" fill="#0e0e10"/></svg>
+  return <div style={{minHeight:'100vh',display:'flex',flexDirection:'column'}}>
+    <header style={{borderBottom:'1px solid var(--border)',padding:'0 24px',display:'flex',alignItems:'center',justifyContent:'space-between',height:56,flexShrink:0}}>
+      <div style={{display:'flex',alignItems:'center',gap:10}}>
+        <div style={{width:26,height:26,borderRadius:6,background:'var(--accent)',display:'flex',alignItems:'center',justifyContent:'center'}}>
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none"><polygon points="7,1 13,5 13,9 7,13 1,9 1,5" fill="#0e0e10"/></svg>
         </div>
-        <span style={{ fontWeight:800, fontSize:17, letterSpacing:'-0.01em' }}>GrupoDrop</span>
+        <span style={{fontWeight:800,fontSize:16,letterSpacing:'-0.01em'}}>GrupoDrop</span>
       </div>
-      <div style={{ fontFamily:'DM Mono', fontSize:12, color:'var(--text-muted)' }}>
-        {store.members.length} membros · {new Date().toLocaleDateString('pt-BR',{ day:'2-digit', month:'short' })}
+      <div style={{fontFamily:'DM Mono',fontSize:11,color:'var(--text-muted)'}}>
+        {store.members.length}m · {store.bosses.length}b · {store.runs.length}r
       </div>
     </header>
 
-    <nav style={{ display:'flex', gap:2, padding:'10px 24px 0', borderBottom:'1px solid var(--border)', flexShrink:0 }}>
+    <nav style={{display:'flex',gap:2,padding:'10px 24px 0',borderBottom:'1px solid var(--border)',flexShrink:0,overflowX:'auto'}}>
       {TABS.map(t=>(
-        <button key={t.id} onClick={()=>setTab(t.id)} style={{ padding:'8px 16px', fontSize:13, fontWeight:tab===t.id?600:400, fontFamily:'Syne,sans-serif', color:tab===t.id?'var(--accent)':'var(--text-muted)', borderBottom:tab===t.id?'2px solid var(--accent)':'2px solid transparent', marginBottom:-1, background:'none', border:'none', borderBottom:tab===t.id?'2px solid var(--accent)':'2px solid transparent', cursor:'pointer' }}>
-          {t.label}
-        </button>
+        <button key={t.id} onClick={()=>setTab(t.id)} style={{
+          padding:'8px 14px',fontSize:13,fontWeight:tab===t.id?600:400,fontFamily:'Syne,sans-serif',
+          color:tab===t.id?'var(--accent)':'var(--text-muted)',
+          borderBottom:tab===t.id?'2px solid var(--accent)':'2px solid transparent',
+          marginBottom:-1,background:'none',border:'none',
+          borderBottom:tab===t.id?'2px solid var(--accent)':'2px solid transparent',
+          cursor:'pointer',whiteSpace:'nowrap',
+        }}>{t.label}</button>
       ))}
     </nav>
 
-    <main style={{ flex:1, overflow:'auto', padding:'24px' }}>
-      <div style={{ maxWidth:720, margin:'0 auto' }}>
-        {tab==='presenca'   && <Presenca  store={store} selectedDate={selectedDate} setSelectedDate={setSelectedDate} />}
-        {tab==='drops'      && <Drops     store={store} selectedDate={selectedDate} setSelectedDate={setSelectedDate} />}
-        {tab==='distribuir' && <Distribuir store={store} selectedDate={selectedDate} setSelectedDate={setSelectedDate} />}
-        {tab==='config'     && <Configurar store={store} />}
+    <main style={{flex:1,overflow:'auto',padding:'24px'}}>
+      <div style={{maxWidth:720,margin:'0 auto'}}>
+        {tab==='presenca' &&<Presenca  store={store} selectedDate={selectedDate} setSelectedDate={setSelectedDate}/>}
+        {tab==='run'      &&<Run       store={store} selectedDate={selectedDate} setSelectedDate={setSelectedDate}/>}
+        {tab==='historico'&&<Historico store={store}/>}
+        {tab==='config'   &&<Configurar store={store}/>}
       </div>
     </main>
   </div>;
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 </body>
 </html>
